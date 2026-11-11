@@ -182,6 +182,16 @@ pnpm dev
 pnpm build && pnpm lint
 ```
 
+### Open Source and Contributions
+
+This repository is open for learning, research, and community collaboration. Use GitHub Issues to report problems or suggest improvements, and Pull Requests to contribute changes. Before submitting, explain the motivation or reproduction steps and run `pnpm build` and `pnpm lint`. Changes to data-processing scripts should also include validation of their generated output. Keep contributions focused and do not include unrelated build artifacts or personal configuration.
+
+- **License:** Follow the actual terms in the root [`LICENSE`](LICENSE). Gallery images, thumbnails, source data, and third-party datasets have separate attribution and usage restrictions. Open-source code does not mean these materials are also MIT-licensed. Review the relevant source license and the copyright notices in this README before using or redistributing any materials.
+- **API keys and privacy:** Configure AI service keys in the application's settings when using the studio. Never put credentials in source code, this README, example configuration, screenshots, Issues, or Pull Requests. Do not commit `.env` files, tokens, private keys, or real user images. If a key was ever committed or exposed, revoke it with the provider and issue a replacement immediately.
+- **Pre-submission check:** Review `git status` and the full diff. Confirm that only intended files are included and that no credentials, personal data, caches, or generated files are staged. Stage only files required for the contribution. `.gitignore` is a safeguard, not a substitute for review.
+
+Typical workflow: fork the repository, create a focused branch from `main`, implement and validate the change, then open a Pull Request against this repository.
+
 ### 数据与图片维护脚本（Python 3）
 
 ```bash
