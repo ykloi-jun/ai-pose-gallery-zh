@@ -12,6 +12,7 @@ import {
   DicesIcon,
   DownloadIcon,
   FileUpIcon,
+  BookmarkPlusIcon,
   ImagePlusIcon,
   KeyRoundIcon,
   LayoutGridIcon,
@@ -34,6 +35,7 @@ import { Field, Section } from '@/components/common/FormSection'
 import { ComfyConnectionStatus } from '@/components/studio/ComfyConnectionStatus'
 import { WorkflowParameters } from '@/components/studio/WorkflowParameters'
 import { applyWorkflowOverrides, validateReferenceCombinations, workflowIdentity } from '@/lib/comfyWorkflowParameters'
+import { resolveGeminiEndpointMode } from '@/lib/geminiEndpoint'
 import { PageHeader } from '@/components/common/PageHeader'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -42,6 +44,7 @@ import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   autoDetectComfyMappings,
   buildRecipePrompt,
@@ -78,6 +81,8 @@ export const Route = createFileRoute('/studio')({
 })
 
 const PROVIDER_LIST: ImageProviderId[] = ['gemini', 'gpt', 'qwen', 'doubao', 'comfyui']
+const SAVED_PROMPTS_KEY = 'pose_atlas_saved_prompts_v1'
+type SavedPrompt = { id: string; name: string; prompt: string }
 
 function StudioPage() {
   const {
@@ -113,6 +118,20 @@ function StudioPage() {
     clearHistory,
   } = useStudio()
   const [comparisonResult, setComparisonResult] = useState<GenerationHistoryItem | null>(null)
+  const [enhancingPrompt, setEnhancingPrompt] = useState(false)
+  const [savedPrompts, setSavedPrompts] = useState<SavedPrompt[]>(() => {
+    try {
+      const value: unknown = JSON.parse(localStorage.getItem(SAVED_PROMPTS_KEY) || '[]')
+      return Array.isArray(value) ? value.filter((item): item is SavedPrompt =>
+        item && typeof item.id === 'string' && typeof item.name === 'string' && typeof item.prompt === 'string'
+      ) : []
+    } catch {
+      return []
+    }
+  })
+  const [savePromptOpen, setSavePromptOpen] = useState(false)
+  const [savedPromptName, setSavedPromptName] = useState('')
+  const promptTextareaRef = useRef<HTMLTextAreaElement | null>(null)
   const previewResult = history.find((item) => item.imageUrl === previewUrl)
   const qc = useQueryClient()
   const fileInputRef = useRef<HTMLInputElement | null>(null)
@@ -133,6 +152,39 @@ function StudioPage() {
   const activeWorkflowImages = activeProvider === 'comfyui' && recipe.workflowImagesIdentity === workflowIdentity(apiConfig.comfyuiParams.workflowJson) ? Object.values(recipe.workflowImages || {}) : []
   const defaultPrompt = buildRecipePrompt(recipe, apiConfig.stylePreset, activeWorkflowImages)
   const prompt = customPrompt ?? defaultPrompt
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SAVED_PROMPTS_KEY, JSON.stringify(savedPrompts))
+    } catch {
+      toast.error('常用提示词保存失败，请检查浏览器存储空间')
+    }
+  }, [savedPrompts])
+
+  const insertSavedPrompt = (value: string) => {
+    const textarea = promptTextareaRef.current
+    const start = textarea?.selectionStart ?? prompt.length
+    const end = textarea?.selectionEnd ?? prompt.length
+    const current = prompt
+    const needsLeadingNewline = start > 0 && current[start - 1] !== '\n' && value[0] !== '\n'
+    const needsTrailingNewline = end < current.length && current[end] !== '\n' && value.at(-1) !== '\n'
+    const insertion = `${needsLeadingNewline ? '\n' : ''}${value}${needsTrailingNewline ? '\n' : ''}`
+    const next = `${current.slice(0, start)}${insertion}${current.slice(end)}`
+    setCustomPrompt(next)
+    requestAnimationFrame(() => {
+      textarea?.focus()
+      textarea?.setSelectionRange(start + insertion.length, start + insertion.length)
+    })
+  }
+
+  const saveCurrentPrompt = () => {
+    const name = savedPromptName.trim()
+    if (!name || !prompt.trim()) return
+    setSavedPrompts((items) => [{ id: crypto.randomUUID(), name, prompt }, ...items])
+    setSavedPromptName('')
+    setSavePromptOpen(false)
+    toast.success('已保存到常用提示词')
+  }
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [extraUrlInput, setExtraUrlInput] = useState('')
   const [showUrlInput, setShowUrlInput] = useState(false)
@@ -394,6 +446,51 @@ function StudioPage() {
       setStitchModalUrl(url)
     } catch (e) {
       toast.error(e instanceof Error ? e.message : '拼图失败')
+    }
+  }
+
+  const handleEnhancePrompt = async () => {
+    const config = apiConfig.promptEnhancer
+    if (!config.baseUrl.trim() || !config.apiKey.trim() || !config.model.trim()) {
+      toast.error("请先在 API 配置中填写提示词增强模型的 Base URL、API Key 和模型 ID")
+      return
+    }
+    if (!prompt.trim()) {
+      toast.error("基础提示词不能为空")
+      return
+    }
+
+    const referenceContext = [
+      recipe.portrait && "人像身份参考：" + (recipe.portrait.标题 || recipe.portrait.发型名称 || "已选择人像参考图"),
+      recipe.costume && "服装与配饰参考：" + (recipe.costume.服装名称 || "已选择服装参考图"),
+      recipe.pose && "姿势与镜头参考：" + ([recipe.pose.姿势名称, recipe.pose.角度].filter(Boolean).join("，") || "已选择姿势参考图"),
+      ...(recipe.extraImages || []).map((image, index) => "附加参考" + (index + 1) + "：" + (image.name || "补充参考图")),
+      ...activeWorkflowImages.map((image) => "工作流参考：" + (image.name || image.role || "补充参考图")),
+    ].filter(Boolean).join("\n")
+
+    setEnhancingPrompt(true)
+    try {
+      const response = await fetch("/api/prompt-enhance", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          baseUrl: config.baseUrl,
+          apiKey: config.apiKey,
+          model: config.model,
+          basePrompt: prompt,
+          referenceContext,
+          stylePreset: STYLE_PRESETS[apiConfig.stylePreset]?.label || apiConfig.stylePreset,
+        }),
+      })
+      const data = await response.json().catch(() => ({})) as { prompt?: string; error?: { message?: string } }
+      if (!response.ok) throw new Error(data.error?.message || "增强请求失败（HTTP " + response.status + "）")
+      if (!data.prompt?.trim()) throw new Error("增强模型没有返回提示词文本")
+      setCustomPrompt(data.prompt.trim())
+      toast.success("提示词已增强，可继续编辑")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "提示词增强失败")
+    } finally {
+      setEnhancingPrompt(false)
     }
   }
 
@@ -1073,11 +1170,26 @@ function StudioPage() {
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
+                          <SelectItem value="auto">自动识别（推荐）</SelectItem>
                           <SelectItem value="native">Native (:generateContent)</SelectItem>
+                          <SelectItem value="openai_images_edits">OpenAI Image Edits (/v1/images/edits)</SelectItem>
+                          <SelectItem value="openai_images_generations">OpenAI Image Generations (/v1/images/generations, 纯出图)</SelectItem>
                           <SelectItem value="openai_chat">OpenAI Chat (/v1/chat/completions)</SelectItem>
                         </SelectContent>
                       </Select>
                     </Field>
+                    {apiConfig.geminiParams.endpointMode === 'openai_images_generations' && (
+                      <p className="text-xs text-muted-foreground">纯出图模式不发送已选参考图，将提示词和比例参数发送到图像生成接口。</p>
+                    )}
+                    {apiConfig.geminiParams.endpointMode === 'auto' && (
+                      <p className="text-xs text-muted-foreground">
+                        自动识别当前使用 {resolveGeminiEndpointMode('auto', apiConfig.providers.gemini.baseUrl) === 'native'
+                          ? 'Gemini Native'
+                          : resolveGeminiEndpointMode('auto', apiConfig.providers.gemini.baseUrl) === 'openai_images_edits'
+                            ? 'OpenAI Image Edits'
+                            : 'OpenAI Chat'} 协议。
+                      </p>
+                    )}
                     <Field label="宽高比 (aspectRatio)">
                       <Select
                         value={apiConfig.geminiParams.aspectRatio}
@@ -1089,11 +1201,19 @@ function StudioPage() {
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="3:4">3:4</SelectItem>
-                          <SelectItem value="9:16">9:16</SelectItem>
+                          {(apiConfig.geminiParams.endpointMode === 'openai_images_edits' || apiConfig.geminiParams.endpointMode === 'openai_images_generations') && (
+                            <SelectItem value="auto">auto（由接口自动选择）</SelectItem>
+                          )}
+                          <SelectItem value="2:3">2:3（手机竖屏）</SelectItem>
+                          <SelectItem value="3:4">3:4（手机竖屏）</SelectItem>
+                          <SelectItem value="4:5">4:5（手机竖屏）</SelectItem>
+                          <SelectItem value="9:16">9:16（手机全屏）</SelectItem>
                           <SelectItem value="1:1">1:1</SelectItem>
-                          <SelectItem value="4:3">4:3</SelectItem>
-                          <SelectItem value="16:9">16:9</SelectItem>
+                          <SelectItem value="5:4">5:4（显示器）</SelectItem>
+                          <SelectItem value="4:3">4:3（显示器）</SelectItem>
+                          <SelectItem value="3:2">3:2（笔记本）</SelectItem>
+                          <SelectItem value="16:9">16:9（宽屏显示器）</SelectItem>
+                          <SelectItem value="21:9">21:9（超宽屏）</SelectItem>
                         </SelectContent>
                       </Select>
                     </Field>
@@ -1411,7 +1531,15 @@ function StudioPage() {
             title="3. 提示词 (Prompt)"
             className="@lg/section:grid-cols-1"
             actions={
-              <div className="flex items-center gap-1.5">
+              <div className="flex flex-wrap items-center justify-end gap-1.5">
+                <Button variant="outline" size="sm" onClick={() => setSavePromptOpen(true)} disabled={!prompt.trim()}>
+                  <BookmarkPlusIcon className="size-3.5" />
+                  保存常用
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => void handleEnhancePrompt()} disabled={enhancingPrompt || isGenerating || uploadingSlot !== null}>
+                  {enhancingPrompt ? <LoaderCircleIcon className="size-3.5 animate-spin" /> : <SparklesIcon className="size-3.5" />}
+                  {enhancingPrompt ? '增强中…' : 'AI 增强'}
+                </Button>
                 <Button variant="ghost" size="sm" onClick={() => setCustomPrompt(null)}>
                   <RotateCcwIcon className="size-3.5" />
                   重置
@@ -1431,6 +1559,7 @@ function StudioPage() {
             }
           >
             <Textarea
+              ref={promptTextareaRef}
               value={prompt}
               onChange={(e) => setCustomPrompt(e.target.value)}
               rows={5}
@@ -1455,6 +1584,27 @@ function StudioPage() {
               )}
             </Button>
           </Section>
+          <Dialog open={savePromptOpen} onOpenChange={setSavePromptOpen}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>保存常用提示词</DialogTitle>
+              </DialogHeader>
+              <Input
+                autoFocus
+                value={savedPromptName}
+                onChange={(event) => setSavedPromptName(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') saveCurrentPrompt()
+                }}
+                placeholder="名称，例如：电影感光线"
+                aria-label="常用提示词名称"
+              />
+              <div className="flex justify-end gap-2">
+                <Button type="button" variant="outline" onClick={() => setSavePromptOpen(false)}>取消</Button>
+                <Button type="button" onClick={saveCurrentPrompt} disabled={!savedPromptName.trim() || !prompt.trim()}>保存</Button>
+              </div>
+            </DialogContent>
+          </Dialog>
         </div>
 
         {/* 右栏：专注展示 AI 生成结果与生成状态 */}
@@ -1528,6 +1678,36 @@ function StudioPage() {
                 </div>
               )}
             </div>
+          </Section>
+          <Section title={`常用提示词 (${savedPrompts.length})`} className="@lg/section:grid-cols-1">
+            {savedPrompts.length > 0 ? (
+              <ul className="max-h-56 space-y-1 overflow-y-auto">
+                {savedPrompts.map((item) => (
+                  <li key={item.id} className="flex min-w-0 items-center gap-1 rounded-md border bg-background px-2">
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          onClick={() => insertSavedPrompt(item.prompt)}
+                          className="min-h-10 min-w-0 flex-1 truncate py-2 text-left text-sm hover:text-primary focus-visible:outline-2 focus-visible:outline-ring"
+                          aria-label={`插入常用提示词：${item.name}`}
+                        >
+                          {item.name}
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="left" align="start" className="max-h-64 max-w-[min(32rem,calc(100vw-2rem))] overflow-y-auto whitespace-pre-wrap break-words text-left">
+                        {item.prompt}
+                      </TooltipContent>
+                    </Tooltip>
+                    <Button type="button" variant="ghost" size="icon-xs" aria-label={`删除常用提示词：${item.name}`} title="删除" onClick={() => setSavedPrompts((items) => items.filter((saved) => saved.id !== item.id))}>
+                      <XIcon />
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="py-2 text-sm text-muted-foreground">暂无常用提示词。点击提示词编辑区旁的“保存常用”添加。</p>
+            )}
           </Section>
           {activeTask && <Section title="待确认任务" className="@lg/section:grid-cols-1">
             <p className="break-all text-xs">{activeTask.task ? `任务 ${activeTask.task.promptId}：刷新后查询原任务，不重复提交。` : '提交结果未知或提交前被中断，请核对后端队列；不会自动重试提交。'}</p>

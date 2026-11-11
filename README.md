@@ -192,6 +192,14 @@ This repository is open for learning, research, and community collaboration. Use
 
 Typical workflow: fork the repository, create a focused branch from `main`, implement and validate the change, then open a Pull Request against this repository.
 
+### 本次修改点
+
+- **Gemini / OpenAI 兼容端点**：Gemini 图像服务支持原生 Gemini、Chat Completions、Image Edits 和纯文生图 Image Generations 请求格式，并可根据 Base URL 自动选择兼容模式；界面提供宽高比和分辨率配置。
+- **常用提示词与 AI 增强**：合成台可保存、插入和删除常用提示词；可配置兼容 OpenAI Chat Completions 的文本模型，根据当前提示词、风格与参考素材说明生成可继续编辑的增强版本。
+- **代理与结果图片加载**：同源代理新增安全的结果图片获取和重定向校验，并限制允许的上游域名和响应大小，缓解部分图床的跨域限制。
+- **生成体验与排错**：优化三张参考图组合时的人像写实提示词，并区分内容安全拒绝、代理错误和网关读取超时等常见失败情况。
+- **本地开发与测试**：补充开发代理环境适配及 Gemini 端点和代理行为测试，可通过 `pnpm test` 运行。
+
 ### 数据与图片维护脚本（Python 3）
 
 ```bash

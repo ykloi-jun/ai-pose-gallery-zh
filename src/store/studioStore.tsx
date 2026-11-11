@@ -15,6 +15,7 @@ import { useComfyConnection, type ComfyConnectionState } from './useComfyConnect
 import { idbRead, idbWrite } from '@/lib/idbStorage'
 import { parseParameterWorkflow, workflowIdentity } from '@/lib/comfyWorkflowParameters'
 import { durableImage, snapshotGeneration } from '@/lib/generationSnapshot'
+import { migrateGeminiEndpointMode } from '@/lib/geminiEndpoint'
 import { recipeBackup } from '@/lib/recipeImages'
 import { randomSlot, type RandomScope, type ReferencePools, type ReferenceSlot } from '@/lib/randomRecipe'
 import {
@@ -57,8 +58,12 @@ const SAFE_MODE_KEY = 'pose_atlas_safe_mode_v1'
 
 const COMFY_CONFIG_VERSION = 3
 
-const shouldEnableProxyByDefault = (provider?: ImageProviderId) =>
-  provider === 'qwen' || provider === 'doubao'
+const shouldEnableProxyByDefault = (provider?: ImageProviderId, baseUrl = '') => {
+  if (provider === 'qwen' || provider === 'doubao') return true
+  if (provider === 'gemini') return Boolean(baseUrl.trim()) && baseUrl.trim() !== PROVIDER_META.gemini.defaultBaseUrl
+  if (provider === 'gpt') return Boolean(baseUrl.trim()) && baseUrl.trim() !== PROVIDER_META.gpt.defaultBaseUrl
+  return false
+}
 
 const DEFAULT_API_CONFIG: ApiConfig = {
   activeProvider: 'gemini',
@@ -66,6 +71,11 @@ const DEFAULT_API_CONFIG: ApiConfig = {
   useProxy: false,
   stylePreset: 'realistic',
   sendStitchedSheet: false,
+  promptEnhancer: {
+    baseUrl: 'https://api.openai.com/v1',
+    apiKey: '',
+    model: 'gpt-4o-mini',
+  },
   providers: {
     gemini: {
       baseUrl: PROVIDER_META.gemini.defaultBaseUrl,
@@ -108,7 +118,7 @@ const DEFAULT_API_CONFIG: ApiConfig = {
     moderation: 'auto',
   },
   geminiParams: {
-    endpointMode: 'native',
+    endpointMode: 'auto',
     aspectRatio: '3:4',
     imageSize: '2K',
   },
@@ -170,25 +180,35 @@ function mergeStoredConfig(raw: unknown): ApiConfig {
     { ...DEFAULT_API_CONFIG.comfyuiParams, configVersion: 1, ...obj.comfyuiParams }
   )
   const activeProvider = obj.activeProvider ?? DEFAULT_API_CONFIG.activeProvider
-  // v3 起服务端 CORS 代理默认关闭，仅在切换到 Qwen / Doubao 时自动关联开启
+  const activeProviderConfig = {
+    ...DEFAULT_API_CONFIG.providers[activeProvider],
+    ...obj.providers?.[activeProvider],
+  }
+  const geminiProvider = { ...DEFAULT_API_CONFIG.providers.gemini, ...obj.providers?.gemini }
+  const geminiParams = { ...DEFAULT_API_CONFIG.geminiParams, ...obj.geminiParams }
+  // 旧配置默认使用 Native；自定义 /v1 网关通常需要 OpenAI Chat 请求体携带 model。
+  geminiParams.endpointMode = migrateGeminiEndpointMode(geminiParams.endpointMode, geminiProvider.baseUrl)
+  // 官方端点可浏览器直连；自定义中转地址默认走同源代理，避免浏览器预检和长请求被本机代理中断。
+  const proxyByDefault = shouldEnableProxyByDefault(activeProvider, activeProviderConfig.baseUrl)
   const useProxy =
     storedVer < 3
-      ? shouldEnableProxyByDefault(activeProvider)
-      : (obj.useProxy ?? shouldEnableProxyByDefault(activeProvider))
+      ? proxyByDefault
+      : (obj.useProxy ?? proxyByDefault)
   return {
     ...DEFAULT_API_CONFIG,
     ...obj,
     activeProvider,
     useProxy,
+    promptEnhancer: { ...DEFAULT_API_CONFIG.promptEnhancer, ...obj.promptEnhancer },
     providers: {
-      gemini: { ...DEFAULT_API_CONFIG.providers.gemini, ...obj.providers?.gemini },
+      gemini: geminiProvider,
       gpt: { ...DEFAULT_API_CONFIG.providers.gpt, ...obj.providers?.gpt },
       qwen: { ...DEFAULT_API_CONFIG.providers.qwen, ...obj.providers?.qwen },
       doubao: { ...DEFAULT_API_CONFIG.providers.doubao, ...obj.providers?.doubao },
       comfyui: comfy.provider,
     },
     gptParams: { ...DEFAULT_API_CONFIG.gptParams, ...obj.gptParams },
-    geminiParams: { ...DEFAULT_API_CONFIG.geminiParams, ...obj.geminiParams },
+    geminiParams,
     qwenParams: { ...DEFAULT_API_CONFIG.qwenParams, ...obj.qwenParams },
     doubaoParams: { ...DEFAULT_API_CONFIG.doubaoParams, ...obj.doubaoParams },
     comfyuiParams: comfy.params,
@@ -550,7 +570,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
     setApiConfig((prev) => {
       const next = { ...prev, ...patch }
       if (patch.activeProvider && patch.useProxy === undefined) {
-        next.useProxy = shouldEnableProxyByDefault(patch.activeProvider)
+        next.useProxy = shouldEnableProxyByDefault(patch.activeProvider, next.providers[patch.activeProvider].baseUrl)
       }
       return next
     })
@@ -559,6 +579,12 @@ export function StudioProvider({ children }: { children: ReactNode }) {
   const updateProviderConfig = (provider: ImageProviderId, patch: Partial<ProviderEndpointConfig>) => {
     setApiConfig((prev) => ({
       ...prev,
+      useProxy: patch.baseUrl !== undefined
+        ? shouldEnableProxyByDefault(provider, patch.baseUrl) || prev.useProxy
+        : prev.useProxy,
+      geminiParams: provider === 'gemini' && patch.baseUrl !== undefined
+        ? { ...prev.geminiParams, endpointMode: 'auto' }
+        : prev.geminiParams,
       providers: {
         ...prev.providers,
         [provider]: {

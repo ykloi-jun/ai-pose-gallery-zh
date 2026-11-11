@@ -130,8 +130,8 @@ export interface GptParams {
 }
 
 export interface GeminiParams {
-  endpointMode: 'native' | 'openai_chat'
-  aspectRatio: '3:4' | '1:1' | '4:3' | '9:16' | '16:9'
+  endpointMode: 'auto' | 'native' | 'openai_chat' | 'openai_images_edits' | 'openai_images_generations'
+  aspectRatio: 'auto' | '2:3' | '3:4' | '4:5' | '9:16' | '1:1' | '5:4' | '4:3' | '3:2' | '16:9' | '21:9'
   imageSize: '1K' | '2K' | '4K'
 }
 
@@ -150,12 +150,19 @@ export interface DoubaoParams {
   responseFormat: 'b64_json' | 'url'
 }
 
+export interface PromptEnhancerConfig {
+  baseUrl: string
+  apiKey: string
+  model: string
+}
+
 export interface ApiConfig {
   activeProvider: ImageProviderId
   imagePassMode: ImagePassMode
   useProxy: boolean
   stylePreset: string
   sendStitchedSheet: boolean
+  promptEnhancer: PromptEnhancerConfig
   providers: Record<ImageProviderId, ProviderEndpointConfig>
   gptParams: GptParams
   geminiParams: GeminiParams

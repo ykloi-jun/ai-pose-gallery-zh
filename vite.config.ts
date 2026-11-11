@@ -4,6 +4,7 @@ import tailwindcss from '@tailwindcss/vite'
 import { tanstackRouter } from '@tanstack/router-plugin/vite'
 import react from '@vitejs/plugin-react'
 import { defineConfig, type Plugin } from 'vite'
+import { onRequestPromptEnhance } from './functions/api/promptEnhance.ts'
 
 const MIME: Record<string, string> = {
   '.json': 'application/json; charset=utf-8',
@@ -18,7 +19,7 @@ const MIME: Record<string, string> = {
 
 // 开发与预览时：
 // 1. 直接挂载仓库根目录下的 data/、thumbs/、img/，避免拷贝 6.8 GB 素材
-// 2. 提供 /api/proxy 同源转发接口，解决 DashScope (Qwen) / 火山方舟 (Doubao) 官方接口的浏览器 CORS 限制
+// 2. 提供 /api/proxy 同源转发接口，解决图像接口与结果图片的浏览器 CORS 限制
 function localAssetsAndProxyPlugin(): Plugin {
   const rootDir = import.meta.dirname
   const prefixes = ['/data/', '/thumbs/', '/img/', '/og-cover.jpg', '/robots.txt', '/sitemap.xml']
@@ -67,8 +68,36 @@ function localAssetsAndProxyPlugin(): Plugin {
     }
   }
 
+  const handlePromptEnhance = async (req: any, res: any) => {
+    try {
+      const chunks: Buffer[] = []
+      for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+      const body = Buffer.concat(chunks)
+      const request = new Request('http://localhost/api/prompt-enhance', {
+        method: 'POST',
+        headers: { 'Content-Type': req.headers['content-type'] || 'application/json' },
+        body: body.toString('utf8'),
+      })
+      const response = await onRequestPromptEnhance({
+        request,
+        env: { PROXY_ALLOWED_ORIGINS: process.env.PROXY_ALLOWED_ORIGINS },
+      })
+      res.statusCode = response.status
+      res.setHeader('Content-Type', response.headers.get('content-type') || 'application/json; charset=utf-8')
+      res.end(Buffer.from(await response.arrayBuffer()))
+    } catch (error: any) {
+      res.statusCode = 502
+      res.setHeader('Content-Type', 'application/json; charset=utf-8')
+      res.end(JSON.stringify({ error: { message: error?.message || 'Prompt enhancement failed' } }))
+    }
+  }
+
   const serve = (req: any, res: any, next: any) => {
     const rawUrl = (req.url || '').split('?')[0]
+    if (rawUrl === '/api/prompt-enhance') {
+      void handlePromptEnhance(req, res)
+      return
+    }
     if (rawUrl === '/api/proxy') {
       void handleProxy(req, res)
       return

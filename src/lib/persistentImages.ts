@@ -3,7 +3,19 @@ import { referenceImageUrl } from './recipeImages'
 
 export async function durableImage(url: string): Promise<string> {
   if (url.startsWith('data:image/')) return url
-  const response = await fetch(referenceImageUrl(url))
+  const imageUrl = referenceImageUrl(url)
+  let response: Response
+  try {
+    response = await fetch(imageUrl)
+  } catch (error) {
+    const isRemoteImage = /^https?:\/\//i.test(imageUrl)
+      && (typeof window === 'undefined' || new URL(imageUrl).origin !== window.location.origin)
+    if (!isRemoteImage) throw error
+    response = await fetch('/api/proxy', {
+      method: 'GET',
+      headers: { 'x-target-url': imageUrl },
+    })
+  }
   if (!response.ok) throw new Error('图片下载失败')
   const blob = await response.blob()
   if (!blob.type.startsWith('image/')) throw new Error('引用不是图片')

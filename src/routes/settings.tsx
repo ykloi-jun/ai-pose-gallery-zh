@@ -18,7 +18,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch'
 import { detectComfyUi, PROVIDER_META } from '@/services/aiGenerator'
 import { useStudio } from '@/store/studioStore'
-import type { ImagePassMode, ImageProviderId } from '@/types/gallery'
+import type { ImagePassMode, ImageProviderId, PromptEnhancerConfig } from '@/types/gallery'
 import { ComfyConnectionStatus } from '@/components/studio/ComfyConnectionStatus'
 import { COMFY_CONNECTION_LABELS } from '@/store/useComfyConnection'
 
@@ -32,11 +32,15 @@ const PROVIDER_ORDER: ImageProviderId[] = ['gemini', 'gpt', 'qwen', 'doubao', 'c
 function SettingsPage() {
   const { apiConfig, updateApiConfig, updateProviderConfig, comfyConnection } = useStudio()
   const [showKey, setShowKey] = useState(false)
+  const [showPromptEnhancerKey, setShowPromptEnhancerKey] = useState(false)
   const [testingComfy, setTestingComfy] = useState(false)
 
   const pid = apiConfig.activeProvider
   const meta = PROVIDER_META[pid]
   const pCfg = apiConfig.providers[pid]
+  const promptEnhancer = apiConfig.promptEnhancer
+  const updatePromptEnhancer = (patch: Partial<PromptEnhancerConfig>) =>
+    updateApiConfig({ promptEnhancer: { ...promptEnhancer, ...patch } })
 
   const handleDetectComfy = async () => {
     setTestingComfy(true)
@@ -209,6 +213,47 @@ function SettingsPage() {
             />
           </Field>
         )}
+      </Section>
+
+      <Section
+        title="AI 提示词增强接口"
+        desc="在生成台将当前提示词和参考图组合说明发送给兼容 OpenAI Chat Completions 的文本模型，返回内容会放回提示词框供你编辑。"
+      >
+        <Field label="Base URL" hint="填写兼容 OpenAI API 的根地址，例如 https://api.openai.com/v1；其他域名需加入服务端 PROXY_ALLOWED_ORIGINS。">
+          <Input
+            type="url"
+            value={promptEnhancer.baseUrl}
+            onChange={(e) => updatePromptEnhancer({ baseUrl: e.target.value })}
+            placeholder="https://api.openai.com/v1"
+          />
+        </Field>
+        <Field label="API Key" hint="保存在当前浏览器配置中；调用时由同源后端转发至此模型服务。">
+          <div className="relative">
+            <Input
+              type={showPromptEnhancerKey ? 'text' : 'password'}
+              value={promptEnhancer.apiKey}
+              onChange={(e) => updatePromptEnhancer({ apiKey: e.target.value })}
+              placeholder="输入提示词增强模型 API Key"
+              className="pr-10"
+            />
+            <button
+              type="button"
+              onClick={() => setShowPromptEnhancerKey((visible) => !visible)}
+              className="absolute top-1/2 right-3 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              aria-label={showPromptEnhancerKey ? '隐藏增强模型 API Key' : '显示增强模型 API Key'}
+            >
+              {showPromptEnhancerKey ? <EyeOffIcon className="size-4" /> : <EyeIcon className="size-4" />}
+            </button>
+          </div>
+        </Field>
+        <Field label="模型 ID">
+          <Input
+            value={promptEnhancer.model}
+            onChange={(e) => updatePromptEnhancer({ model: e.target.value })}
+            placeholder="gpt-4o-mini"
+            className="font-mono text-xs"
+          />
+        </Field>
       </Section>
 
       {pid === 'comfyui' && (

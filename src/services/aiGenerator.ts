@@ -2,6 +2,7 @@ import type { ApiConfig, ExtraReferenceImage, ImageProviderId, RecipeState } fro
 import { applyWorkflowOverrides, getWorkflowImages, validateReferenceCombinations, workflowIdentity, type ComfyObjectInfo } from '@/lib/comfyWorkflowParameters'
 import { poseImagePath, referenceImageUrl } from '@/lib/recipeImages'
 import qwen2509ThreeImageWorkflow from '@/workflows/qwen_image_edit_2509_3img.api.json'
+import { buildGeminiRequest, resolveGeminiEndpointMode } from '@/lib/geminiEndpoint'
 
 export interface ProviderModelOption {
   value: string
@@ -152,7 +153,64 @@ export const STYLE_PRESETS: Record<string, { label: string; prompt: string }> = 
 // 用自然语言逐项描述（人物 / 服装 / 姿势），实测比堆砌要点更能让多图编辑模型还原服装、避免照搬人体模型线条
 const PHOTO_STYLES = new Set(['realistic', 'fashion', 'film'])
 
+function buildDefaultThreeReferencePrompt(recipe: RecipeState): string {
+  const costumeName = recipe.costume?.source === 'upload'
+    ? '图2中的整套服装和配饰'
+    : recipe.costume?.服装名称 || '图2中的整套服装和配饰'
+  const poseName = recipe.pose?.source === 'upload'
+    ? '图3中的动作与镜头角度'
+    : [recipe.pose?.姿势名称, recipe.pose?.角度].filter(Boolean).join('，') || '图3中的动作与镜头角度'
+
+  return [
+    '请根据提供的3张参考图，生成一张仅包含一位真实人物的完整照片。**图1决定人物身份与身材，图2决定服装与配饰，图3决定姿势与镜头角度。** 三张参考图的作用应明确区分，不得重复叠加人物或肢体。',
+    '',
+    '### 1. 人物身份、身材与外观特征',
+    '以图1作为人物整体参考，保持其脸型、五官、发型、发色、肤色和整体辨识度一致。',
+    '',
+    '同时复用图1中清晰可见的身材特征，包括骨架大小、肩宽、颈部比例、胸腰臀比例、四肢长短与粗细、头身比例和身体整体体量。不得擅自瘦身、增肌、丰胸、收腰、拉长双腿或美化为另一种体型。根据图1可见信息还原人物，不臆造未展示或无法确认的身体细节。',
+    '',
+    '保留图1中清晰可见且未被新服装遮挡的个人特征，例如雀斑、痣和纹身。图1原有服装、鞋包及可替换配饰由图2对应内容替换。',
+    '',
+    '所有裸露皮肤，包括颈部、手臂、手部、腿部及服装镂空处露出的皮肤，基础肤色均须与图1人物一致；允许因光照产生自然明暗变化，避免不同部位出现不合理色差。保留真实、自然的肌肤纹理。被连裤袜覆盖的部位应呈现面料颜色及合理的透肤效果。',
+    '',
+    '### 2. 服装与配饰',
+    '人物穿着图2展示的整套服装和配饰。参考名称：**' + costumeName + '**。',
+    '',
+    '每件单品的颜色、款式、剪裁、面料、纹理、长度、细节及配饰样式均以图2为准，名称仅作辅助说明。保留服装原有的层次与搭配关系。',
+    '',
+    '服装应自然适配图1人物的身材，随着图3动作形成合理的松紧、垂坠、拉伸与褶皱，不得为了贴合图2展示效果而改变人物体型。连裤袜自然包覆双腿，鞋与脚正确对应，包和衣物的轮廓与身体清楚区分。',
+    '',
+    '### 3. 姿势与镜头',
+    '参考图3人体模型的动作、身体朝向和正面镜头角度，还原**' + poseName + '**的姿势，以及相应的躯干倾斜、关节弯曲和肢体前后遮挡关系。',
+    '',
+    '图3仅提供动作与构图参考，不提供人物外貌、肤色、材质或身体比例。最终人物必须具有图1的真实外貌与身材，不得继承图3人体模型的体型或塑料质感。',
+    '',
+    '使用图1人物的身体比例完成图3动作，允许根据实际体型自然调整关节位置与接触位置，保持动作意图一致，避免强行拉长或扭曲肢体。接触脚踝的手应自然贴合图3对应的脚踝，手指、脚踝和小腿的边界清晰，接触处具有合理的遮挡与阴影。',
+    '',
+    '### 4. 人体结构与遮挡关系',
+    '画面中只有一个人物，具有一个头部、一个躯干、一个骨盆、两条手臂、两只手、两条腿和两只脚。',
+    '',
+    '左右腿分别从骨盆对应位置自然连接，每条腿沿“大腿—膝盖—小腿—脚踝—脚”的结构连续延伸。准确还原图3中左右腿各自的位置、弯曲方向和前后关系，确保每一段可见肢体都能明确归属于左腿或右腿。',
+    '',
+    '双腿弯曲、交叉或被裙摆、手部及配饰遮挡时，被遮挡部分应自然隐藏，不为了展示完整肢体而额外补画腿、膝盖、小腿、脚踝或脚。手抚脚踝的接触位置不得产生肢体分叉、融合或重复轮廓。',
+    '',
+    '人物重心合理，关节弯曲自然，手部与五官结构准确。保持完整人物构图，四肢的可见范围与图3的姿态遮挡相符。',
+    '',
+    '### 5. 摄影风格与画面要求',
+    '写实商业摄影级质感，85mm人像镜头观感，自然柔和光影，真实肌肤纹理与清晰织物细节，8K高清细节表现。避免过度磨皮和塑料质感。',
+    '',
+    '人物、服装与环境的光源方向、色温、阴影和透视统一。背景简洁，突出人物及服装。画面中没有任何文字、标志或水印。',
+    '',
+    '**负面提示词（工具支持独立负面提示词栏时使用）：**',
+    '多余人物，重复人物，第三条腿，多余肢体，重复的大腿，重复的小腿，多余膝盖，多余脚踝，多余脚，多余手臂，多余手指，肢体分叉，肢体融合，肢体断裂，关节错位，反向关节，手与脚踝融合，脚与鞋重复，错误的遮挡关系，身体比例失真，过度拉长双腿，擅自改变体型，脸部身份改变，肤色不一致，人体模型，塑料皮肤，过度磨皮，服装错配，文字，标志，水印。',
+  ].join('\n')
+}
+
 export function buildRecipePrompt(recipe: RecipeState, stylePreset = 'realistic', workflowImages: ExtraReferenceImage[] = []): string {
+  if (stylePreset === 'realistic' && recipe.portrait && recipe.costume && recipe.pose && workflowImages.length === 0 && (recipe.extraImages || []).length === 0) {
+    return buildDefaultThreeReferencePrompt(recipe)
+  }
+
   const styleInfo = STYLE_PRESETS[stylePreset] ?? STYLE_PRESETS.realistic
   const isPhoto = PHOTO_STYLES.has(stylePreset)
   const faceless = !recipe.portrait && !workflowImages.some((image) => image.role === 'character_sheet') && Boolean(recipe.costume && recipe.pose)
@@ -409,6 +467,47 @@ async function smartFetch(
     headers,
     body: init.body,
   })
+}
+
+export function formatProviderRequestError(
+  provider: ImageProviderId,
+  status: number,
+  upstreamMessage: string,
+  recipe: RecipeState,
+): string {
+  const shortName = PROVIDER_META[provider].shortName
+  const message = upstreamMessage.trim().slice(0, 1000) || 'HTTP ' + status
+  const isSafetyRejection = /prompt\s+or\s+image\s+unsafe|(?:prompt|image).{0,30}unsafe|unsafe.{0,30}(?:prompt|image)|内容安全|审核拒绝/i.test(message)
+
+  if (isSafetyRejection) {
+    const pose = recipe.pose
+    const poseName = pose?.姿势名称 ? '「' + pose.姿势名称 + '」' : '图3姿势参考'
+    const poseIsSuggestive = /性感/i.test([pose?.体系, pose?.分类, pose?.姿势名称].filter(Boolean).join(' '))
+    const likelyTrigger = poseIsSuggestive
+      ? '当前姿势参考' + poseName + '属于性感系，可能是触发项；也可能来自人像/服装参考图或提示词。'
+      : '触发项可能来自提示词或任一参考图。'
+    return '[' + shortName + '] 中转站内容安全审核拒绝了本次请求（' + message + '）。' + likelyTrigger + '请检查内容，尝试换用标准系姿势和更保守的参考图/描述后再提交。'
+  }
+
+  if (status === 524) {
+    return '[' + shortName + '] 上游网关读取超时（HTTP 524）。任务可能仍在中转站后台运行；请先查任务记录，确认没有在生成后再重试，避免重复计费。'
+  }
+
+  if (status === 502) {
+    return '[' + shortName + '] 本地代理未能取得上游的有效响应（HTTP 502）：' + message
+  }
+
+  return '[' + shortName + '] ' + message
+}
+
+export async function readJsonResponse(response: Response): Promise<any> {
+  const text = await response.text()
+  try {
+    return JSON.parse(text)
+  } catch {
+    const plainText = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500)
+    return { error: { message: plainText || '上游返回了无法解析的非 JSON 响应' } }
+  }
 }
 
 function extractUniversalImage(json: any): string | null {
@@ -1560,7 +1659,7 @@ export async function generateCharacterImage(params: {
       ? Object.values(recipe.workflowImages || {}).map((image) => image.url) : []),
   ].filter(Boolean) as string[]
 
-  if (!rawSources.length) {
+  if (!rawSources.length && !(provider === 'gemini' && config.geminiParams.endpointMode === 'openai_images_generations')) {
     throw new Error('请先选择或上传至少 1 张参考图')
   }
 
@@ -1570,6 +1669,9 @@ export async function generateCharacterImage(params: {
   }
 
   const baseUrl = (pCfg.baseUrl.trim() || PROVIDER_META[provider].defaultBaseUrl).replace(/\/+$/, '')
+  const geminiEndpointMode = provider === 'gemini'
+    ? resolveGeminiEndpointMode(config.geminiParams.endpointMode, baseUrl)
+    : undefined
 
   if (provider === 'comfyui') {
     return generateWithComfyUi({ recipe, prompt, config, baseUrl, apiKey, onProgress, onSubmitting: params.onSubmitting, onSubmitted: params.onSubmitted, signal: params.signal })
@@ -1582,7 +1684,7 @@ export async function generateCharacterImage(params: {
   const needBase64 =
     config.imagePassMode === 'base64' ||
     config.sendStitchedSheet ||
-    (provider === 'gemini' && config.geminiParams.endpointMode === 'native') ||
+    (provider === 'gemini' && (geminiEndpointMode === 'native' || geminiEndpointMode === 'openai_images_edits')) ||
     (provider === 'gpt' && config.gptParams.endpointMode === 'images_edits')
 
   const imageRefs: string[] = needBase64
@@ -1629,7 +1731,7 @@ export async function generateCharacterImage(params: {
         },
         config.useProxy
       )
-      json = await res.json()
+      json = await readJsonResponse(res)
     } else if (g.endpointMode === 'images_edits') {
       // 传统 /v1/images/edits (multipart/form-data 二进制文件上传)
       const fd = new FormData()
@@ -1654,7 +1756,7 @@ export async function generateCharacterImage(params: {
         },
         config.useProxy
       )
-      json = await res.json()
+      json = await readJsonResponse(res)
     } else if (g.endpointMode === 'responses') {
       // OpenAI Responses API (/v1/responses) 支持直接传 HTTPS image_url 或 Base64
       const inputContent = [
@@ -1684,7 +1786,7 @@ export async function generateCharacterImage(params: {
         },
         config.useProxy
       )
-      json = await res.json()
+      json = await readJsonResponse(res)
     } else {
       // 兼容中转站 Chat Completions，支持直接传 HTTPS URL
       const content = [
@@ -1707,7 +1809,7 @@ export async function generateCharacterImage(params: {
         },
         config.useProxy
       )
-      json = await res.json()
+      json = await readJsonResponse(res)
     }
   }
   // =========================================================================
@@ -1715,66 +1817,18 @@ export async function generateCharacterImage(params: {
   // =========================================================================
   else if (provider === 'gemini') {
     const gm = config.geminiParams
-    if (gm.endpointMode === 'native') {
-      const root = baseUrl.replace(/\/v1(?:beta)?$/, '')
-      const url = `${root}/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`
-      const parts = [
-        ...allImageRefs.map((du) => ({
-          inlineData: { mimeType: 'image/png', data: du.split(',')[1] },
-        })),
-        { text: prompt },
-      ]
-      const isGemini3 = model.includes('gemini-3')
-      const imageConfig: Record<string, string> = {
-        aspectRatio: gm.aspectRatio,
-      }
-      if (isGemini3 && gm.imageSize) {
-        imageConfig.imageSize = gm.imageSize
-      }
-
-      res = await smartFetch(
-        url,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-goog-api-key': apiKey,
-          },
-          body: JSON.stringify({
-            contents: [{ role: 'user', parts }],
-            generationConfig: {
-              responseModalities: ['TEXT', 'IMAGE'],
-              imageConfig,
-            },
-          }),
-        },
-        config.useProxy
-      )
-      json = await res.json()
-    } else {
-      const v1 = baseUrl.endsWith('/v1') ? baseUrl : `${baseUrl}/v1`
-      const content = [
-        { type: 'text', text: `${prompt}\n(Output aspect ratio: ${gm.aspectRatio}, resolution: ${gm.imageSize})` },
-        ...allImageRefs.map((ref) => ({ type: 'image_url', image_url: { url: ref } })),
-      ]
-      res = await smartFetch(
-        `${v1}/chat/completions`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${apiKey}`,
-          },
-          body: JSON.stringify({
-            model,
-            messages: [{ role: 'user', content }],
-            modalities: ['text', 'image'],
-          }),
-        },
-        config.useProxy
-      )
-      json = await res.json()
-    }
+    const request = buildGeminiRequest({
+      baseUrl,
+      endpointMode: config.geminiParams.endpointMode,
+      model,
+      apiKey,
+      prompt,
+      imageRefs: allImageRefs,
+      aspectRatio: gm.aspectRatio,
+      imageSize: gm.imageSize,
+    })
+    res = await smartFetch(request.url, request.init, config.useProxy)
+    json = await readJsonResponse(res)
   }
   // =========================================================================
   // 协议 3: 阿里云百炼 Qwen-Image (DashScope multimodal-generation)
@@ -1820,7 +1874,7 @@ export async function generateCharacterImage(params: {
       },
       config.useProxy
     )
-    json = await res.json()
+    json = await readJsonResponse(res)
   }
   // =========================================================================
   // 协议 4: 字节火山方舟 Doubao Seedream (/api/v3/images/generations)
@@ -1856,7 +1910,7 @@ export async function generateCharacterImage(params: {
       },
       config.useProxy
     )
-    json = await res.json()
+    json = await readJsonResponse(res)
   }
 
   if (!res.ok) {
@@ -1865,7 +1919,7 @@ export async function generateCharacterImage(params: {
       json?.message ||
       json?.code ||
       `请求失败 (HTTP ${res.status})`
-    throw new Error(`[${PROVIDER_META[provider].shortName}] ${errMsg}`)
+    throw new Error(formatProviderRequestError(provider, res.status, String(errMsg), recipe))
   }
 
   const imageUrl = extractUniversalImage(json)
