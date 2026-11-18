@@ -1670,7 +1670,7 @@ export async function generateCharacterImage(params: {
 
   const baseUrl = (pCfg.baseUrl.trim() || PROVIDER_META[provider].defaultBaseUrl).replace(/\/+$/, '')
   const geminiEndpointMode = provider === 'gemini'
-    ? resolveGeminiEndpointMode(config.geminiParams.endpointMode, baseUrl)
+    ? resolveGeminiEndpointMode(config.geminiParams.endpointMode, baseUrl, model)
     : undefined
 
   if (provider === 'comfyui') {

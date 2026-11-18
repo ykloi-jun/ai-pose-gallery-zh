@@ -38,7 +38,9 @@ if (hasProxyEnvironment()) {
 }
 
 const viteEntry = path.resolve('node_modules/vite/bin/vite.js')
-const vite = spawn(process.execPath, ['--use-env-proxy', viteEntry, ...process.argv.slice(2)], {
+const viteArgs = process.argv.slice(2)
+if (!viteArgs.some((arg) => arg === '--host' || arg.startsWith('--host='))) viteArgs.unshift('--host', 'localhost')
+const vite = spawn(process.execPath, ['--use-env-proxy', viteEntry, ...viteArgs], {
   env: process.env,
   stdio: 'inherit',
 })

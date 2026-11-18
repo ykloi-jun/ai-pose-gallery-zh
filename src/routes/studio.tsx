@@ -34,12 +34,23 @@ import { costumesQuery, portraitsQuery, posesQuery } from '@/api/gallery'
 import { Field, Section } from '@/components/common/FormSection'
 import { ComfyConnectionStatus } from '@/components/studio/ComfyConnectionStatus'
 import { WorkflowParameters } from '@/components/studio/WorkflowParameters'
+import { HistoryImageReuseMenu, type HistoryImageReuseTarget } from '@/components/studio/HistoryImageReuseMenu'
 import { applyWorkflowOverrides, validateReferenceCombinations, workflowIdentity } from '@/lib/comfyWorkflowParameters'
 import { resolveGeminiEndpointMode } from '@/lib/geminiEndpoint'
 import { PageHeader } from '@/components/common/PageHeader'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
@@ -62,6 +73,7 @@ import {
 } from '@/services/aiGenerator'
 import { poseImagePath, poseThumbPath, referenceImageUrl, uploadedReferences } from '@/lib/recipeImages'
 import { useStudio } from '@/store/studioStore'
+import { durableImage } from '@/lib/persistentImages'
 import type { RandomScope, ReferenceSlot } from '@/lib/randomRecipe'
 import { selectCostumeView } from '@/lib/costumeSources'
 import type {
@@ -84,6 +96,37 @@ const PROVIDER_LIST: ImageProviderId[] = ['gemini', 'gpt', 'qwen', 'doubao', 'co
 const SAVED_PROMPTS_KEY = 'pose_atlas_saved_prompts_v1'
 type SavedPrompt = { id: string; name: string; prompt: string }
 
+function ReferenceImageMetadata({ src, width: initialWidth, height: initialHeight, bytes: initialBytes }: {
+  src: string
+  width?: number
+  height?: number
+  bytes?: number
+}) {
+  const [metadata, setMetadata] = useState({ width: initialWidth || 0, height: initialHeight || 0, bytes: initialBytes || 0 })
+
+  useEffect(() => {
+    let cancelled = false
+    const image = new Image()
+    image.onload = () => {
+      if (!cancelled) setMetadata((current) => ({ ...current, width: current.width || image.naturalWidth, height: current.height || image.naturalHeight }))
+    }
+    image.src = referenceImageUrl(src)
+    if (!initialBytes) {
+      void fetch(referenceImageUrl(src)).then((response) => response.ok ? response.blob() : null).then((blob) => {
+        if (!cancelled && blob) setMetadata((current) => ({ ...current, bytes: blob.size }))
+      }).catch(() => {})
+    }
+    return () => { cancelled = true; image.onload = null }
+  }, [src, initialBytes])
+
+  const { width, height, bytes } = metadata
+  const gcd = (a: number, b: number): number => b ? gcd(b, a % b) : a
+  const aspect = width && height ? `${width / gcd(width, height)}:${height / gcd(width, height)}` : '读取中'
+  const size = bytes ? bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / (1024 * 1024)).toFixed(2)} MB` : '未知'
+
+  return <div className="text-[10px] leading-relaxed text-muted-foreground">{aspect} · {width && height ? `${width} × ${height}` : '尺寸读取中'} · {size}</div>
+}
+
 function StudioPage() {
   const {
     hydrated, activeTask, resumeGeneration, stopTracking,
@@ -105,6 +148,7 @@ function StudioPage() {
     addExtraImage,
     removeExtraImage,
     updateExtraImageName,
+    replaceExtraImage,
     updateApiConfig,
     updateProviderConfig,
     updateGptParams,
@@ -118,6 +162,9 @@ function StudioPage() {
     clearHistory,
   } = useStudio()
   const [comparisonResult, setComparisonResult] = useState<GenerationHistoryItem | null>(null)
+  const [pendingReuse, setPendingReuse] = useState<{ result: GenerationHistoryItem; target: HistoryImageReuseTarget; label: string } | null>(null)
+  const [reusingResultId, setReusingResultId] = useState<string | null>(null)
+  const reuseResultLock = useRef(false)
   const [enhancingPrompt, setEnhancingPrompt] = useState(false)
   const [savedPrompts, setSavedPrompts] = useState<SavedPrompt[]>(() => {
     try {
@@ -341,6 +388,55 @@ function StudioPage() {
   ].filter((slot) => slot.node && slot.node !== 'none' && parsedComfyNodes.imageNodes.some((node) => node.id === slot.node && node.emptyValue === undefined) && !slot.image).map((slot) => slot.label) : []
 
   const extraImages = recipe.extraImages || []
+  const reuseHistoryResult = async (result: GenerationHistoryItem, target: HistoryImageReuseTarget) => {
+    if (reuseResultLock.current) return
+    reuseResultLock.current = true
+    setReusingResultId(result.id)
+    try {
+      const url = await durableImage(result.imageUrl)
+      const image = new Image()
+      image.src = url
+      await image.decode()
+      const name = '生成结果 · ' + result.model
+      if (target.slot === 'extra') {
+        if (target.id) {
+          replaceExtraImage(target.id, { name, url })
+          toast.success('已用生成结果替换附图')
+        } else {
+          addExtraImage({ name, url })
+        }
+      } else {
+        const bytes = (await (await fetch(url)).blob()).size
+        const items = uploadedReferences(name, url, image.naturalWidth, image.naturalHeight, bytes)
+        if (target.slot === 'portrait') setPortrait(items.portrait)
+        if (target.slot === 'costume') setCostume(items.costume)
+        if (target.slot === 'pose') setPose(items.pose)
+        const label = { portrait: '人像', costume: '服装', pose: '姿势' }[target.slot]
+        toast.success('已将生成结果用作' + label + '参考图')
+      }
+    } catch (error) {
+      toast.error('复用失败：' + (error instanceof Error ? error.message : '图片读取失败'))
+    } finally {
+      reuseResultLock.current = false
+      setReusingResultId(null)
+    }
+  }
+
+  const requestHistoryReuse = (result: GenerationHistoryItem, target: HistoryImageReuseTarget) => {
+    if (reuseResultLock.current) return
+    if (target.slot === 'extra') {
+      const index = extraImages.findIndex((image) => image.id === target.id)
+      if (index !== -1) {
+        setPendingReuse({ result, target, label: '附图 #' + (index + 1) + '（' + extraImages[index].name + '）' })
+        return
+      }
+    } else if (recipe[target.slot]) {
+      setPendingReuse({ result, target, label: { portrait: '人像', costume: '服装', pose: '姿势' }[target.slot] })
+      return
+    }
+    void reuseHistoryResult(result, target)
+  }
+
   const hasStitchRefs = Boolean(recipe.portrait || recipe.costume || recipe.pose || extraImages.length > 0)
   const hasAnyRef = hasStitchRefs || activeWorkflowImages.length > 0
 
@@ -610,6 +706,7 @@ function StudioPage() {
                       <div className="line-clamp-2 text-xs font-medium leading-snug" title={recipe.portrait.发型名称}>
                         {recipe.portrait.发型名称}
                       </div>
+                      <ReferenceImageMetadata key={recipe.portrait.原图 || recipe.portrait.缩略图} src={recipe.portrait.原图 || recipe.portrait.缩略图} width={recipe.portrait.宽} height={recipe.portrait.高} bytes={recipe.portrait.字节数} />
                     </div>
                   </>
                 ) : (
@@ -661,6 +758,7 @@ function StudioPage() {
                       <div className="line-clamp-2 text-xs font-medium leading-snug" title={recipe.costume.服装名称}>
                         {recipe.costume.服装名称}
                       </div>
+                      <ReferenceImageMetadata key={recipe.costume.原图 || recipe.costume.预览图 || recipe.costume.缩略图} src={recipe.costume.原图 || recipe.costume.预览图 || recipe.costume.缩略图} />
                       {costumeViews.length > 0 && <Select
                         value={costumeViews.find((view) => view.id === recipe.costume?.selectedView)?.id || costumeViews.find((view) => view.id === 'front')?.id || costumeViews[0].id}
                         disabled={uploadingSlot !== null || randomizingSlot !== null}
@@ -761,6 +859,7 @@ function StudioPage() {
                       >
                         {recipe.pose.角度 ? `${recipe.pose.姿势名称} · ${recipe.pose.角度}` : recipe.pose.姿势名称}
                       </div>
+                      <ReferenceImageMetadata key={poseImagePath(recipe.pose)} src={poseImagePath(recipe.pose)} />
                     </div>
                   </>
                 ) : (
@@ -807,6 +906,7 @@ function StudioPage() {
                           placeholder="备注(如:配饰/背景)"
                           className="w-full truncate bg-transparent text-xs font-medium outline-none focus:underline"
                         />
+                        <ReferenceImageMetadata key={img.url} src={img.url} />
                       </div>
                       <button
                         type="button"
@@ -1763,6 +1863,12 @@ function StudioPage() {
               <div className="mt-2 space-y-1.5 px-0.5">
                 <div className="truncate text-xs font-medium">{h.recipeSummary}</div>
                 <Button variant="outline" className="min-h-11 w-full" onClick={() => setComparisonResult(h)}>对比参考</Button>
+                <HistoryImageReuseMenu
+                  extraImages={extraImages}
+                  disabled={!hydrated || reusingResultId !== null || uploadingSlot !== null || randomizingSlot !== null}
+                  loading={reusingResultId === h.id}
+                  onSelect={(target) => requestHistoryReuse(h, target)}
+                />
                 <div className="grid grid-cols-2 gap-1.5">
                   <button
                     type="button"
@@ -1787,6 +1893,23 @@ function StudioPage() {
           ))}
         </Section>
       )}
+
+      <AlertDialog open={pendingReuse !== null} onOpenChange={(open) => { if (!open) setPendingReuse(null) }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认替换参考图？</AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingReuse?.label}已有图片，是否用这张生成结果替换？其他参考图保持不变。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction onClick={() => {
+              if (pendingReuse) void reuseHistoryResult(pendingReuse.result, pendingReuse.target)
+            }}>确认替换</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <ReferenceComparisonDialog result={comparisonResult} open={comparisonResult !== null} onOpenChange={(open) => !open && setComparisonResult(null)} />
       {/* 生成结果全屏放大灯箱 */}

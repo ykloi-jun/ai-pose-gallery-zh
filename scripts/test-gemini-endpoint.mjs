@@ -65,8 +65,19 @@ try {
   assert.equal(migratedMode, 'auto', 'legacy native settings should migrate to automatic protocol selection')
   assert.equal(resolveGeminiEndpointMode('auto', 'https://generativelanguage.googleapis.com'), 'native', 'official Gemini endpoints should retain native mode')
   assert.equal(resolveGeminiEndpointMode('auto', 'https://api.bblabu.ai/v1'), 'openai_images_edits', 'image-only /v1 gateways should select image edits')
+  assert.equal(resolveGeminiEndpointMode('auto', 'https://api.bblabu.ai/v1', 'doubao-seedream-5-5'), 'openai_images_generations', 'Seedream gateways should use the multi-image generation payload')
   assert.equal(resolveGeminiEndpointMode('native', 'https://api.bblabu.ai/v1'), 'native', 'manual native mode should override automatic detection')
   assert.equal(resolveGeminiEndpointMode('openai_chat', 'https://generativelanguage.googleapis.com'), 'openai_chat', 'manual OpenAI Chat mode should override automatic detection')
+  const { buildGeminiRequest } = await vite.ssrLoadModule('/src/lib/geminiEndpoint.ts')
+  for (const [imageSize, expectedSize] of [['1K', '768x1024'], ['2K', '1536x2048'], ['4K', '2448x3264']]) {
+    const imageRequest = buildGeminiRequest({
+      baseUrl: 'https://api.bblabu.ai/v1', endpointMode: 'openai_images_edits',
+      model: 'gpt-image-2.6-sunburst', apiKey: 'test-key', prompt: 'test prompt',
+      imageRefs: ['data:image/png;base64,AA=='], aspectRatio: '3:4', imageSize,
+    })
+    assert.equal(imageRequest.init.body.get('size'), expectedSize, `${imageSize} should map to the requested 3:4 pixel dimensions`)
+    assert.equal(imageRequest.init.body.get('quality'), null, 'resolution must not be sent as rendering quality')
+  }
   const result = await generateCharacterImage({
     recipe: { portrait: null, costume: null, pose: null, extraImages: [{ url: 'data:image/png;base64,AA==' }] },
     prompt: 'test prompt',
@@ -136,6 +147,29 @@ try {
     quality: '2k',
   }, 'generation request should include the selected aspect ratio and image size')
   assert.equal(textOnlyResult.modelUsed, modelId)
+
+  await generateCharacterImage({
+    recipe: {
+      portrait: { source: 'upload', id: 'portrait', 原图: 'data:image/png;base64,AA==', 缩略图: 'data:image/png;base64,AA==', 标题: '人像', 发型名称: '短发', 发长: '', 分区: '上传', 宽: 1, 高: 1, 字节数: 1, 精选: false, 热门: false, 检索: 'portrait' },
+      costume: { source: 'upload', id: 'costume', 原图: 'data:image/png;base64,AQ==', 预览图: 'data:image/png;base64,AQ==', 缩略图: 'data:image/png;base64,AQ==', 分类: '上传', 服装名称: '服装', 标签: [], 关键词: '', 检索: 'costume' },
+      pose: { source: 'upload', id: 'pose', 原图: 'data:image/png;base64,Ag==', 缩略图: 'data:image/png;base64,Ag==', 体系: '上传', 姿势编号: '', 分类: '上传', 姿势名称: '姿势', 角度: '正面', 检索: 'pose' },
+      extraImages: [],
+    },
+    prompt: 'test prompt',
+    config: {
+      activeProvider: 'gemini',
+      imagePassMode: 'url',
+      useProxy: false,
+      stylePreset: 'realistic',
+      sendStitchedSheet: false,
+      providers: {
+        gemini: { baseUrl: 'https://api.bblabu.ai/v1', apiKey: 'test-key', model: 'doubao-seedream-5-5', customModel: '' },
+      },
+      geminiParams: { endpointMode: 'auto', aspectRatio: '3:4', imageSize: '1K' },
+    },
+  })
+  assert.equal(capturedRequest.url.pathname, '/v1/images/generations', 'Seedream should use the generations endpoint')
+  assert.deepEqual(JSON.parse(capturedRequest.init.body).image, ['data:image/png;base64,AA==', 'data:image/png;base64,AQ==', 'data:image/png;base64,Ag=='], 'Seedream should receive all three core references in portrait/costume/pose order')
 
   const { durableImage } = await vite.ssrLoadModule('/src/lib/persistentImages.ts')
   const upstreamImageUrl = 'https://tmp.cangyuansuanli.cn/gen-images/test/result.jpg'

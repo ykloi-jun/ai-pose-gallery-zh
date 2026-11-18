@@ -252,6 +252,7 @@ interface StudioContextValue {
   addExtraImage: (item: { name: string; url: string }) => void
   removeExtraImage: (id: string) => void
   updateExtraImageName: (id: string, name: string) => void
+  replaceExtraImage: (id: string, image: Pick<ExtraReferenceImage, 'name' | 'url'>) => void
   setWorkflowImage: (nodeId: string, image: ExtraReferenceImage | null, identity: string) => void
   clearRecipe: () => void
   randomizeRecipe: (pools: { portraits?: PortraitItem[]; costumes?: CostumeItem[]; poses?: PoseItem[] }) => void
@@ -491,6 +492,13 @@ export function StudioProvider({ children }: { children: ReactNode }) {
     setRecipe((r) => ({
       ...r,
       extraImages: (r.extraImages || []).map((x) => (x.id === id ? { ...x, name } : x)),
+    }))
+  }
+
+  const replaceExtraImage = (id: string, image: Pick<ExtraReferenceImage, 'name' | 'url'>) => {
+    setRecipe((r) => ({
+      ...r,
+      extraImages: (r.extraImages || []).map((item) => item.id === id ? { ...item, ...image } : item),
     }))
   }
 
@@ -779,6 +787,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
         addExtraImage,
         removeExtraImage,
         updateExtraImageName,
+        replaceExtraImage,
         setWorkflowImage,
         clearRecipe,
         randomizeRecipe,

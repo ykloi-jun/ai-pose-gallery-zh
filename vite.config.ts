@@ -93,6 +93,15 @@ function localAssetsAndProxyPlugin(): Plugin {
   }
 
   const serve = (req: any, res: any, next: any) => {
+    const host = String(req.headers.host || '').toLowerCase()
+    const loopbackAlias = host.match(/^127\.0\.0\.1(?::(\d+))?$/)
+    if (loopbackAlias) {
+      res.statusCode = 307
+      res.setHeader('Location', `http://localhost${loopbackAlias[1] ? `:${loopbackAlias[1]}` : ''}${req.url || '/'}`)
+      res.setHeader('Cache-Control', 'no-store')
+      res.end()
+      return
+    }
     const rawUrl = (req.url || '').split('?')[0]
     if (rawUrl === '/api/prompt-enhance') {
       void handlePromptEnhance(req, res)
