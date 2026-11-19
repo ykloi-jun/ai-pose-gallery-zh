@@ -58,3 +58,27 @@ export async function idbWrite<T>(key: string, value: T): Promise<void> {
     })
   } finally { db.close() }
 }
+
+// Keep the read and write in one transaction to preserve changes from other tabs.
+export async function idbUpdate<T>(key: string, update: (current: T | undefined) => T): Promise<T> {
+  const db = await openDb()
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite')
+      const store = tx.objectStore(STORE_NAME)
+      const request = store.get(key)
+      let next: T
+      tx.oncomplete = () => resolve(next)
+      tx.onabort = () => reject(tx.error || new Error('浏览器存储写入失败'))
+      request.onsuccess = () => {
+        try {
+          next = update(request.result)
+          if (next !== request.result) store.put(next, key)
+        } catch (error) {
+          tx.abort()
+          reject(error)
+        }
+      }
+    })
+  } finally { db.close() }
+}
