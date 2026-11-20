@@ -1,4 +1,5 @@
 import { PIXAI_FLASH_MODEL } from '@/services/pixai'
+import { relayModelIds, RELAY_ENDPOINTS } from '@/services/relay'
 import { ReferenceComparisonDialog } from '@/components/common/ReferenceComparisonDialog'
 import { ImageViewer } from '@/components/common/ImageViewer'
 import { useQueryClient } from '@tanstack/react-query'
@@ -88,6 +89,7 @@ import type {
   ImageProviderId,
   QwenParams,
   PixAiParams,
+  RelayImageParams,
 } from '@/types/gallery'
 
 export const Route = createFileRoute('/studio')({
@@ -95,7 +97,7 @@ export const Route = createFileRoute('/studio')({
   component: StudioPage,
 })
 
-const PROVIDER_LIST: ImageProviderId[] = ['gemini', 'gpt', 'qwen', 'doubao', 'pixai', 'comfyui']
+const PROVIDER_LIST: ImageProviderId[] = ['gemini', 'gpt', 'relay', 'qwen', 'doubao', 'pixai', 'comfyui']
 const SAVED_PROMPTS_KEY = 'pose_atlas_saved_prompts_v1'
 type SavedPrompt = { id: string; name: string; prompt: string }
 
@@ -157,6 +159,7 @@ function StudioPage() {
     updateProviderConfig,
     updatePixAiParams,
     updateGptParams,
+    updateRelayParams,
     updateGeminiParams,
     updateQwenParams,
     updateDoubaoParams,
@@ -200,6 +203,9 @@ function StudioPage() {
   const activeProvider = apiConfig.activeProvider
   const providerMeta = PROVIDER_META[activeProvider]
   const providerCfg = apiConfig.providers[activeProvider]
+  const modelOptions = activeProvider === 'relay'
+    ? relayModelIds(apiConfig.providers.relay).map((model) => ({ value: model, label: model }))
+    : providerMeta.models
   const gptCfg = apiConfig.providers.gpt
   const gptModel = gptCfg.model === 'custom' ? gptCfg.customModel.trim() : gptCfg.model
   const supportsInputFidelity = Boolean(getGptInputFidelity(gptModel, 'high') || getGptInputFidelity(gptModel, 'low'))
@@ -241,7 +247,7 @@ function StudioPage() {
     toast.success('已保存到常用提示词')
   }
   const [recoveryTaskId, setRecoveryTaskId] = useState('')
-  const [showAdvanced, setShowAdvanced] = useState(false)
+  const [showAdvanced, setShowAdvanced] = useState(true)
   const [extraUrlInput, setExtraUrlInput] = useState('')
   const [showUrlInput, setShowUrlInput] = useState(false)
   const [stitchModalUrl, setStitchModalUrl] = useState<string | null>(null)
@@ -505,7 +511,7 @@ function StudioPage() {
         : { poses: (await qc.ensureQueryData(posesQuery)).items }
       randomizeSlot(slot, randomScopes[slot], pools, expectedId)
     } catch {
-      toast.error('素材库加载失败，请稍后重试')
+      toast.error('素材库加载失败，请稍后重试', { duration: 3000, autoDismissWhilePaused: true })
     } finally {
       setRandomizingSlot(null)
     }
@@ -984,7 +990,7 @@ function StudioPage() {
           <Section
             title="2. 模型与参数"
             actions={
-              <Button variant="ghost" size="sm" onClick={() => setShowAdvanced((v) => !v)}>
+              <Button variant="ghost" size="sm" aria-expanded={showAdvanced} onClick={() => setShowAdvanced((v) => !v)}>
                 <SlidersHorizontalIcon className="size-3.5" />
                 高级参数
                 {showAdvanced ? (
@@ -1131,13 +1137,14 @@ function StudioPage() {
                 <Field label="模型 ID">
                   <Select
                     value={providerCfg.model}
+                    disabled={!modelOptions.length}
                     onValueChange={(v) => updateProviderConfig(activeProvider, { model: v })}
                   >
                     <SelectTrigger className="w-full font-mono text-xs">
-                      <SelectValue />
+                      <SelectValue placeholder={modelOptions.length ? '选择模型' : '请在 API 配置中添加模型'} />
                     </SelectTrigger>
                     <SelectContent>
-                      {providerMeta.models.map((m) => (
+                      {modelOptions.map((m) => (
                         <SelectItem key={m.value} value={m.value} className="font-mono text-xs">
                           {m.label}
                         </SelectItem>
@@ -1146,7 +1153,7 @@ function StudioPage() {
                   </Select>
                 </Field>
 
-                {providerCfg.model === 'custom' && (
+                {activeProvider !== 'relay' && providerCfg.model === 'custom' && (
                   <Field label="自定义模型 ID">
                     <Input
                       value={providerCfg.customModel}
@@ -1372,6 +1379,95 @@ function StudioPage() {
                         </SelectContent>
                       </Select>
                     </Field>
+                  </>
+                )}
+
+                {activeProvider === 'relay' && (
+                  <>
+                    <Field label="中转接口协议">
+                      <Select value={apiConfig.relayEndpointMode} onValueChange={(value) => updateApiConfig({ relayEndpointMode: value as typeof apiConfig.relayEndpointMode })}>
+                        <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          {Object.entries(RELAY_ENDPOINTS).map(([value, label]) => (
+                            <SelectItem key={value} value={value}>{label}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                    {apiConfig.relayEndpointMode === 'chat' ? (
+                      <p className="text-xs text-muted-foreground">Chat Completions 仅发送提示词和参考图；尺寸、质量等图像接口参数不适用于此协议。</p>
+                    ) : (
+                      <>
+                        <Field label="输出宽高比 (aspect_ratio)">
+                          <Select value={apiConfig.relayParams.aspectRatio} onValueChange={(value) => updateRelayParams({ aspectRatio: value as RelayImageParams['aspectRatio'] })}>
+                            <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="auto">auto（由接口自动选择）</SelectItem>
+                              <SelectItem value="2:3">2:3（手机竖屏）</SelectItem>
+                              <SelectItem value="3:4">3:4（手机竖屏）</SelectItem>
+                              <SelectItem value="4:5">4:5（手机竖屏）</SelectItem>
+                              <SelectItem value="9:16">9:16（手机竖屏）</SelectItem>
+                              <SelectItem value="1:1">1:1</SelectItem>
+                              <SelectItem value="5:4">5:4（显示器）</SelectItem>
+                              <SelectItem value="4:3">4:3（显示器）</SelectItem>
+                              <SelectItem value="3:2">3:2（笔记本）</SelectItem>
+                              <SelectItem value="16:9">16:9（宽屏显示器）</SelectItem>
+                              <SelectItem value="21:9">21:9（超宽屏）</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </Field>
+                        <Field label="输出质量 (quality)" hint="中转站仅接受 1k、2k 或 4k。">
+                          <Select value={apiConfig.relayParams.quality} onValueChange={(value) => updateRelayParams({ quality: value as RelayImageParams['quality'] })}>
+                            <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="1k">1K</SelectItem>
+                              <SelectItem value="2k">2K</SelectItem>
+                              <SelectItem value="4k">4K</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </Field>
+                        <Field label="参考还原度 (input_fidelity)" hint="选择 auto 时不发送此参数；仅在中转站支持时启用。">
+                          <Select value={apiConfig.relayParams.inputFidelity} onValueChange={(value) => updateRelayParams({ inputFidelity: value as RelayImageParams['inputFidelity'] })}>
+                            <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="auto">auto（由接口决定）</SelectItem>
+                              <SelectItem value="high">high</SelectItem>
+                              <SelectItem value="low">low</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </Field>
+                        <Field label="背景模式 (background)">
+                          <Select value={apiConfig.relayParams.background} onValueChange={(value) => updateRelayParams({ background: value as RelayImageParams['background'] })}>
+                            <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="auto">auto</SelectItem>
+                              <SelectItem value="transparent">transparent</SelectItem>
+                              <SelectItem value="opaque">opaque</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </Field>
+                        <Field label="图片格式 (output_format)">
+                          <Select value={apiConfig.relayParams.outputFormat} onValueChange={(value) => updateRelayParams({ outputFormat: value as RelayImageParams['outputFormat'] })}>
+                            <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="auto">auto（由接口决定）</SelectItem>
+                              <SelectItem value="png">png</SelectItem>
+                              <SelectItem value="webp">webp</SelectItem>
+                              <SelectItem value="jpeg">jpeg</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </Field>
+                        <Field label="内容审核 (moderation)">
+                          <Select value={apiConfig.relayParams.moderation} onValueChange={(value) => updateRelayParams({ moderation: value as RelayImageParams['moderation'] })}>
+                            <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="auto">auto</SelectItem>
+                              <SelectItem value="low">low</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </Field>
+                      </>
+                    )}
                   </>
                 )}
 

@@ -1,5 +1,5 @@
 import fs from 'node:fs'
-import { handleProxy as forwardProxy } from './functions/api/proxy.ts'
+import { handleProxy as forwardProxy, onRequestGet } from './functions/api/proxy.ts'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 import tailwindcss from '@tailwindcss/vite'
@@ -40,7 +40,9 @@ function localAssetsAndProxyPlugin(): Plugin {
       const request = new Request('http://localhost/api/proxy', {
         method, headers, body, ...(body ? { duplex: 'half' } : {}),
       } as RequestInit)
-      const upstream = await forwardProxy({ request, env: { PROXY_ALLOWED_ORIGINS: process.env.PROXY_ALLOWED_ORIGINS } })
+      const env = { PROXY_ALLOWED_ORIGINS: process.env.PROXY_ALLOWED_ORIGINS }
+      const forward = method === 'GET' ? onRequestGet : forwardProxy
+      const upstream = await forward({ request, env })
       res.statusCode = upstream.status
       upstream.headers.forEach((value, key) => res.setHeader(key, value))
       res.end(Buffer.from(await upstream.arrayBuffer()))

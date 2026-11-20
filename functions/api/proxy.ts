@@ -115,6 +115,11 @@ export const handleProxy = async (context: { request: Request; env?: ProxyEnv })
     return jsonResponse(400, 'Invalid x-target-url header')
   }
 
+  if (request.headers.get('x-proxy-mode') === 'model-list' &&
+      (request.method !== 'GET' || !target.pathname.endsWith('/models'))) {
+    return jsonResponse(400, 'Invalid model list endpoint')
+  }
+
   // 只允许白名单（含环境变量 PROXY_ALLOWED_ORIGINS）内的 https 上游，其余一律拒绝
   if (target.username || target.password || target.protocol !== 'https:' || !isOriginAllowed(target, env?.PROXY_ALLOWED_ORIGINS)) {
     return jsonResponse(403, 'Target origin not allowed')
@@ -239,6 +244,7 @@ const proxyImage = async (context: { request: Request; env?: ProxyEnv }) => {
 export const onRequestPost = handleProxy
 
 export const onRequestGet = async (context: { request: Request; env?: ProxyEnv }) => {
+  if (context.request.headers.get('x-proxy-mode') === 'model-list') return handleProxy(context)
   const targetUrl = context.request.headers.get('x-target-url')
   if (targetUrl) {
     try {

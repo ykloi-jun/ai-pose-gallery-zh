@@ -85,13 +85,30 @@ export interface RecipeState {
   extraImages?: ExtraReferenceImage[]
 }
 
-export type ImageProviderId = 'gemini' | 'gpt' | 'qwen' | 'doubao' | 'comfyui' | 'pixai'
+export type ImageProviderId = 'gemini' | 'gpt' | 'qwen' | 'doubao' | 'comfyui' | 'pixai' | 'relay'
 
 export interface ProviderEndpointConfig {
   baseUrl: string
   apiKey: string
   model: string
   customModel: string
+}
+
+export type RelayEndpointMode = 'images_edits_json' | 'images_edits' | 'chat'
+
+export interface RelayProviderConfig extends ProviderEndpointConfig {
+  fetchedModels: string[]
+  manualModels: string[]
+  useProxy: boolean
+}
+
+export interface RelayImageParams {
+  aspectRatio: 'auto' | '2:3' | '3:4' | '4:5' | '9:16' | '1:1' | '5:4' | '4:3' | '3:2' | '16:9' | '21:9'
+  quality: '1k' | '2k' | '4k'
+  inputFidelity: 'auto' | 'high' | 'low'
+  background: 'auto' | 'opaque' | 'transparent'
+  outputFormat: 'auto' | 'png' | 'jpeg' | 'webp'
+  moderation: 'auto' | 'low'
 }
 
 export type ImagePassMode = 'url' | 'base64'
@@ -170,9 +187,11 @@ export interface ApiConfig {
   useProxy: boolean
   stylePreset: string
   sendStitchedSheet: boolean
+  relayEndpointMode: RelayEndpointMode
   promptEnhancer: PromptEnhancerConfig
-  providers: Record<ImageProviderId, ProviderEndpointConfig>
+  providers: Record<ImageProviderId, ProviderEndpointConfig> & { relay: RelayProviderConfig }
   gptParams: GptParams
+  relayParams: RelayImageParams
   geminiParams: GeminiParams
   qwenParams: QwenParams
   doubaoParams: DoubaoParams

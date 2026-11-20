@@ -18,6 +18,7 @@ import { useComfyConnection, type ComfyConnectionState } from './useComfyConnect
 import { idbRead, idbUpdate, idbWrite } from '@/lib/idbStorage'
 import { parseParameterWorkflow, workflowIdentity } from '@/lib/comfyWorkflowParameters'
 import { durableImage, snapshotGeneration } from '@/lib/generationSnapshot'
+import { relayModelIds } from '@/services/relay'
 import { recipeBackup } from '@/lib/recipeImages'
 import { randomSlot, type RandomScope, type ReferencePools, type ReferenceSlot } from '@/lib/randomRecipe'
 import {
@@ -39,11 +40,11 @@ import type {
   GeminiParams,
   GenerationHistoryItem,
   GptParams,
+  RelayImageParams,
   ImageProviderId,
   PortraitItem,
   PoseItem,
   PixAiParams,
-  ProviderEndpointConfig,
   QwenParams,
   RecipeState,
 } from '@/types/gallery'
@@ -129,9 +130,11 @@ interface StudioContextValue {
   randomizeRecipe: (pools: { portraits?: PortraitItem[]; costumes?: CostumeItem[]; poses?: PoseItem[] }) => void
   randomizeSlot: (slot: ReferenceSlot, scope: RandomScope, pools: ReferencePools, expectedId?: string | null) => void
   updateApiConfig: (patch: Partial<ApiConfig>) => void
-  updateProviderConfig: (provider: ImageProviderId, patch: Partial<ProviderEndpointConfig>) => void
+  updateProviderConfig: <P extends ImageProviderId>(provider: P, patch: Partial<ApiConfig['providers'][P]>) => void
+  setFetchedRelayModels: (connection: Pick<ApiConfig['providers']['relay'], 'baseUrl' | 'apiKey' | 'useProxy'>, models: string[]) => void
   updatePixAiParams: (patch: Partial<PixAiParams>) => void
   updateGptParams: (patch: Partial<GptParams>) => void
+  updateRelayParams: (patch: Partial<RelayImageParams>) => void
   updateGeminiParams: (patch: Partial<GeminiParams>) => void
   updateQwenParams: (patch: Partial<QwenParams>) => void
   updateDoubaoParams: (patch: Partial<DoubaoParams>) => void
@@ -412,7 +415,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
   const randomizeSlot = (slot: ReferenceSlot, scope: RandomScope, pools: ReferencePools, expectedId?: string | null) => {
     const current = randomContext.current
     if (expectedId !== undefined && (current.recipe[slot]?.id ?? null) !== expectedId) {
-      toast.info('参考已更改，本次换样已取消')
+      toast.info('参考已更改，本次换样已取消', { duration: 3000, autoDismissWhilePaused: true })
       return
     }
     const next = randomSlot(current.recipe, slot, scope, {
@@ -421,11 +424,11 @@ export function StudioProvider({ children }: { children: ReactNode }) {
       poses: (pools.poses || []).filter((item) => !current.safeMode || !isNsfwPose(item)),
     }, current.poseDepthMode)
     if (!next) {
-      toast.info(scope === 'similar' ? '没有其他同类素材，可切到“全部”再试' : '没有其他可用素材')
+      toast.info(scope === 'similar' ? '没有其他同类素材，可切到“全部”再试' : '没有其他可用素材', { duration: 3000, autoDismissWhilePaused: true })
       return
     }
     setRecipe((previous) => ({ ...previous, [slot]: next[slot] }))
-    toast.success(`已更换${{ portrait: '人像', costume: '服装', pose: '姿势' }[slot]}，其他参考保持不变`)
+    toast.success(`已更换${{ portrait: '人像', costume: '服装', pose: '姿势' }[slot]}，其他参考保持不变`, { duration: 3000, autoDismissWhilePaused: true })
   }
 
   const updateApiConfig = (patch: Partial<ApiConfig>) => {
@@ -438,7 +441,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
     })
   }
 
-  const updateProviderConfig = (provider: ImageProviderId, patch: Partial<ProviderEndpointConfig>) => {
+  const updateProviderConfig = <P extends ImageProviderId,>(provider: P, patch: Partial<ApiConfig['providers'][P]>) => {
     setApiConfig((prev) => ({
       ...prev,
       useProxy: patch.baseUrl !== undefined
@@ -458,12 +461,28 @@ export function StudioProvider({ children }: { children: ReactNode }) {
     }))
   }
 
+  const setFetchedRelayModels: StudioContextValue['setFetchedRelayModels'] = (connection, fetchedModels) => {
+    setApiConfig((prev) => {
+      const relay = prev.providers.relay
+      if (relay.baseUrl !== connection.baseUrl || relay.apiKey !== connection.apiKey || relay.useProxy !== connection.useProxy) return prev
+
+      const nextRelay = { ...relay, fetchedModels }
+      const models = relayModelIds(nextRelay)
+      if (!models.includes(relay.model)) nextRelay.model = models[0] ?? ''
+      return { ...prev, providers: { ...prev.providers, relay: nextRelay } }
+    })
+  }
+
   const updatePixAiParams = (patch: Partial<PixAiParams>) => {
     setApiConfig((prev) => ({ ...prev, pixaiParams: { ...prev.pixaiParams, ...patch } }))
   }
 
   const updateGptParams = (patch: Partial<GptParams>) => {
     setApiConfig((prev) => ({ ...prev, gptParams: { ...prev.gptParams, ...patch } }))
+  }
+
+  const updateRelayParams = (patch: Partial<RelayImageParams>) => {
+    setApiConfig((prev) => ({ ...prev, relayParams: { ...prev.relayParams, ...patch } }))
   }
 
   const updateGeminiParams = (patch: Partial<GeminiParams>) => {
@@ -594,7 +613,9 @@ export function StudioProvider({ children }: { children: ReactNode }) {
     let record: ActiveTask = { provider: configSnapshot.activeProvider, baseUrl: configSnapshot.providers[configSnapshot.activeProvider].baseUrl, prompt: finalPrompt, summary: [recipeSnapshot.portrait?.发型名称, recipeSnapshot.costume?.服装名称, recipeSnapshot.pose?.姿势名称].filter(Boolean).join(' + ') || '自定义合成' }
     isGeneratingRef.current = true
     setIsGenerating(true)
-    setGeneratingModel(PROVIDER_META[configSnapshot.activeProvider].models.find((model) => model.value === configSnapshot.providers[configSnapshot.activeProvider].model)?.label || PROVIDER_META[configSnapshot.activeProvider].shortName)
+    const providerMeta = PROVIDER_META[configSnapshot.activeProvider]
+    const modelId = configSnapshot.providers[configSnapshot.activeProvider].model
+    setGeneratingModel(providerMeta.models.find((model) => model.value === modelId)?.label || modelId || providerMeta.shortName)
     setGenerationError('')
     setGenerationProgress(null)
     const controller = new AbortController()
@@ -674,8 +695,10 @@ export function StudioProvider({ children }: { children: ReactNode }) {
         randomizeSlot,
         updateApiConfig,
         updateProviderConfig,
+        setFetchedRelayModels,
         updatePixAiParams,
         updateGptParams,
+        updateRelayParams,
         updateGeminiParams,
         updateQwenParams,
         updateDoubaoParams,

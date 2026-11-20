@@ -9,10 +9,60 @@ const server = await createServer({
   resolve: { alias: { '@': fileURLToPath(new URL('../src', import.meta.url)) } },
 })
 after(() => server.close())
-const { generateCharacterImage } = await server.ssrLoadModule('/src/services/aiGenerator.ts')
+const { generateCharacterImage, toPublicHttpsUrl } = await server.ssrLoadModule('/src/services/aiGenerator.ts')
 const reference = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6ioAAAAASUVORK5CYII='
+test('multipart edits sends every image from the reference combination', async () => {
+  const images = ['AQ==', 'Ag==', 'Aw==', 'BA=='].map((value) => `data:image/png;base64,${value}`)
+  const originalFetch = globalThis.fetch
+  let body
+  globalThis.fetch = async (_url, init) => {
+    body = init.body
+    return Response.json({ data: [{ b64_json: reference.split(',')[1] }] })
+  }
+  try {
+    await generateCharacterImage({
+      recipe: {
+        portrait: { 原图: images[0] },
+        costume: { 预览图: images[1] },
+        pose: { 原图: images[2] },
+        extraImages: [{ url: images[3] }],
+      },
+      prompt: 'Use all reference images.',
+      config: {
+        activeProvider: 'gpt',
+        providers: { gpt: { model: 'gpt-image-1.5', customModel: '', baseUrl: 'https://api.openai.com/v1', apiKey: 'test-key' } },
+        imagePassMode: 'url', sendStitchedSheet: false, useProxy: false,
+        gptParams: { endpointMode: 'images_edits', inputFidelity: 'high', size: '1024x1024', quality: 'low', background: 'auto', outputFormat: 'png', moderation: 'auto' },
+      },
+    })
+    const files = body.getAll('image[]')
+    assert.equal(files.length, images.length)
+    assert.deepEqual(await Promise.all(files.map(async (file) => Buffer.from(await file.arrayBuffer()).toString('base64'))), ['AQ==', 'Ag==', 'Aw==', 'BA=='])
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
 
-async function captureRequest(model, endpointMode, inputFidelity = 'high', useProxy = false, customModel = '') {
+test('JSON edits sends source URLs for the selected gallery references', async () => {
+  const { payload } = await captureRequest('gpt-image-1.5', 'images_edits_json', 'high', false, '', {
+    portrait: { 原图: 'img/portrait/f71f980dde3.webp' },
+    costume: { 预览图: 'img/costume/SXY-0060.webp' },
+    pose: { 原图: 'img/full_sexy_P001_front.png' },
+  })
+  assert.deepEqual(payload.images.map(({ image_url }) => image_url), [
+    'https://ai-portrait-gallery.pages.dev/img/full/f71f980dde3.png',
+    'https://ai-costume-gallery.pages.dev/img/SXY-0060.webp',
+    'https://ai-pose-gallery.pages.dev/img/full_sexy_P001_front.png',
+  ])
+})
+
+test('URL mode maps gallery thumbnails and full-size costume assets to their source paths', () => {
+  assert.equal(toPublicHttpsUrl('/thumbs/portrait/f71f980dde3.webp'), 'https://ai-portrait-gallery.pages.dev/img/thumb/f71f980dde3.webp')
+  assert.equal(toPublicHttpsUrl('thumbs/costume/SXY-0060.webp'), 'https://ai-costume-gallery.pages.dev/thumbs/SXY-0060.webp')
+  assert.equal(toPublicHttpsUrl('img/costume/SXY-0060.png'), 'https://ai-costume-gallery.pages.dev/png/SXY-0060.png')
+})
+
+async function captureRequest(model, endpointMode, inputFidelity = 'high', useProxy = false, customModel = '', recipe) {
   const originalFetch = globalThis.fetch
   const requests = []
   globalThis.fetch = async (url, init) => {
@@ -22,7 +72,7 @@ async function captureRequest(model, endpointMode, inputFidelity = 'high', usePr
   }
   try {
     const result = await generateCharacterImage({
-      recipe: { extraImages: [{ url: reference, name: 'reference' }] },
+      recipe: recipe ?? { extraImages: [{ url: reference, name: 'reference' }] },
       prompt: 'Draw a blue circle.',
       config: {
         activeProvider: 'gpt', providers: { gpt: { model, customModel, baseUrl: 'https://api.openai.com/v1', apiKey: 'test-key' } },

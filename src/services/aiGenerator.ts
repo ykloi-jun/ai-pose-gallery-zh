@@ -5,6 +5,7 @@ import { applyWorkflowOverrides, getWorkflowImages, validateReferenceCombination
 import { poseImagePath, referenceImageUrl } from '@/lib/recipeImages'
 import qwen2509ThreeImageWorkflow from '@/workflows/qwen_image_edit_2509_3img.api.json'
 import { buildGeminiRequest, resolveGeminiEndpointMode } from '@/lib/geminiEndpoint'
+import { relayApiBase, relayFetch } from './relay'
 
 export interface ProviderModelOption {
   value: string
@@ -22,7 +23,7 @@ export const PROVIDER_META: Record<
     name: string
     shortName: string
     defaultBaseUrl: string
-    docUrl: string
+    docUrl?: string
     models: ProviderModelOption[]
   }
 > = {
@@ -57,6 +58,13 @@ export const PROVIDER_META: Record<
       { value: 'gpt-image-1', label: 'gpt-image-1' },
       { value: 'custom', label: '自定义模型 ID' },
     ],
+  },
+  relay: {
+    id: 'relay',
+    name: 'API 中转站',
+    shortName: '中转站',
+    defaultBaseUrl: '',
+    models: [],
   },
   qwen: {
     id: 'qwen',
@@ -422,13 +430,18 @@ export function toPublicHttpsUrl(src: string): string {
   // 本地开发态自动映射为源站 Cloudflare Pages 公网 HTTPS 地址，方便云端生图接口直接拉取
   if (clean.startsWith('img/portrait/')) {
     const filename = clean.slice('img/portrait/'.length).replace(/\.webp$/i, '.png')
-    return `https://ai-portrait-gallery.pages.dev/img/${filename}`
+    return `https://ai-portrait-gallery.pages.dev/img/full/${filename}`
   }
   if (clean.startsWith('thumbs/portrait/')) {
-    return `https://ai-portrait-gallery.pages.dev/thumbs/${clean.slice('thumbs/portrait/'.length)}`
+    return `https://ai-portrait-gallery.pages.dev/img/thumb/${clean.slice('thumbs/portrait/'.length)}`
   }
-  if (clean.startsWith('img/costume/') || clean.startsWith('thumbs/costume/')) {
-    return `https://ai-costume-gallery.pages.dev/${clean}`
+  if (clean.startsWith('img/costume/')) {
+    const filename = clean.slice('img/costume/'.length)
+    const directory = /\.png$/i.test(filename) ? 'png' : 'img'
+    return `https://ai-costume-gallery.pages.dev/${directory}/${filename}`
+  }
+  if (clean.startsWith('thumbs/costume/')) {
+    return `https://ai-costume-gallery.pages.dev/thumbs/${clean.slice('thumbs/costume/'.length)}`
   }
   if (clean.startsWith('img/depth/')) {
     const filename = clean.slice('img/depth/'.length).replace(/\.webp$/i, '.png')
@@ -520,9 +533,9 @@ export async function readJsonResponse(response: Response): Promise<any> {
   }
 }
 
-function extractUniversalImage(json: any): string | null {
+function extractUniversalImage(json: any, imageFormat = 'png'): string | null {
   // 1. OpenAI / Doubao Seedream standard: data[0].b64_json or data[0].url
-  if (json?.data?.[0]?.b64_json) return `data:image/png;base64,${json.data[0].b64_json}`
+  if (json?.data?.[0]?.b64_json) return `data:image/${imageFormat};base64,${json.data[0].b64_json}`
   if (json?.data?.[0]?.url) return json.data[0].url
 
   // 2. OpenAI Responses API output[].result
@@ -1676,12 +1689,13 @@ export async function generateCharacterImage(params: {
     throw new Error('请先选择或上传至少 1 张参考图')
   }
 
-  const model = pCfg.model === 'custom' ? pCfg.customModel.trim() : pCfg.model
+  const model = provider === 'relay' ? pCfg.model.trim() : pCfg.model === 'custom' ? pCfg.customModel.trim() : pCfg.model
   if (provider !== 'comfyui' && !model) {
     throw new Error('请选择或填写有效的模型名称')
   }
 
   const baseUrl = (pCfg.baseUrl.trim() || PROVIDER_META[provider].defaultBaseUrl).replace(/\/+$/, '')
+  const relayBase = provider === 'relay' ? relayApiBase(baseUrl) : undefined
   const geminiEndpointMode = provider === 'gemini'
     ? resolveGeminiEndpointMode(config.geminiParams.endpointMode, baseUrl, model)
     : undefined
@@ -1698,7 +1712,8 @@ export async function generateCharacterImage(params: {
     config.imagePassMode === 'base64' ||
     config.sendStitchedSheet ||
     (provider === 'gemini' && (geminiEndpointMode === 'native' || geminiEndpointMode === 'openai_images_edits')) ||
-    (provider === 'gpt' && config.gptParams.endpointMode === 'images_edits')
+    (provider === 'gpt' && config.gptParams.endpointMode === 'images_edits') ||
+    (provider === 'relay' && config.relayEndpointMode === 'images_edits')
 
   const imageRefs: string[] = needBase64
     ? await Promise.all(rawSources.map(srcToPngDataUrl))
@@ -1711,10 +1726,53 @@ export async function generateCharacterImage(params: {
   let res: Response
   let json: any
 
+  if (relayBase) {
+    const headers = new Headers({ Authorization: `Bearer ${apiKey}` })
+    const mode = config.relayEndpointMode
+    const options: Record<string, string> = {}
+    if (mode !== 'chat') {
+      const relayParams = config.relayParams
+      if (relayParams.aspectRatio !== 'auto') options.size = relayParams.aspectRatio
+      options.quality = relayParams.quality
+      if (relayParams.inputFidelity !== 'auto') options.input_fidelity = relayParams.inputFidelity
+      if (relayParams.background !== 'auto') options.background = relayParams.background
+      if (relayParams.outputFormat !== 'auto') options.output_format = relayParams.outputFormat
+      if (relayParams.moderation !== 'auto') options.moderation = relayParams.moderation
+    }
+
+    let body: FormData | string
+    if (mode === 'images_edits') {
+      const form = new FormData()
+      form.append('model', model)
+      form.append('prompt', prompt)
+      for (const [name, value] of Object.entries(options)) form.append(name, value)
+      allImageRefs.forEach((ref, i) => form.append('image[]', dataUrlToBlob(ref), `ref_${i + 1}.png`))
+      body = form
+    } else {
+      headers.set('Content-Type', 'application/json')
+      body = JSON.stringify(mode === 'chat' ? {
+        model,
+        messages: [{ role: 'user', content: [
+          { type: 'text', text: prompt },
+          ...allImageRefs.map((ref) => ({ type: 'image_url', image_url: { url: ref } })),
+        ] }],
+        modalities: ['text', 'image'],
+      } : {
+        model,
+        prompt,
+        images: allImageRefs.map((ref) => ({ image_url: ref })),
+        ...options,
+      })
+    }
+    const path = mode === 'chat' ? 'chat/completions' : 'images/edits'
+    res = await relayFetch(`${relayBase}/${path}`, { method: 'POST', headers, body, signal: params.signal }, config.providers.relay.useProxy)
+    json = await readJsonResponse(res)
+  }
+
   // =========================================================================
   // 协议 1: OpenAI GPT Image (gpt-image-2.5 / gpt-image-2 / gpt-image-1.5 / 1)
   // =========================================================================
-  if (provider === 'gpt') {
+  else if (provider === 'gpt') {
     const g = config.gptParams
     const inputFidelity = getGptInputFidelity(model, g.inputFidelity)
     const v1 = baseUrl.endsWith('/v1') ? baseUrl : `${baseUrl}/v1`
@@ -1936,7 +1994,8 @@ export async function generateCharacterImage(params: {
     throw new Error(formatProviderRequestError(provider, res.status, String(errMsg), recipe))
   }
 
-  const imageUrl = extractUniversalImage(json)
+  const relayFormat = provider === 'relay' && config.relayEndpointMode !== 'chat' ? config.relayParams.outputFormat : 'auto'
+  const imageUrl = extractUniversalImage(json, relayFormat === 'auto' ? 'png' : relayFormat)
   if (!imageUrl) {
     const fallbackText =
       json?.choices?.[0]?.message?.content ||

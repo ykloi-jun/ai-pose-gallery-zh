@@ -2,6 +2,7 @@ import type { ApiConfig, ImageProviderId } from '@/types/gallery'
 import { PROVIDER_META, DEFAULT_COMFY_PRESET, COMFYUI_WORKFLOW_TEMPLATES } from '@/services/aiGenerator'
 import { DEFAULT_PIXAI_PARAMS, PIXAI_MODEL, PIXAI_MODELS } from '@/services/pixai'
 import { migrateGeminiEndpointMode } from '@/lib/geminiEndpoint'
+import { normalizeRelayModels, relayModelIds } from '@/services/relay'
 
 const COMFY_CONFIG_VERSION = 3
 
@@ -18,8 +19,10 @@ export const DEFAULT_API_CONFIG: ApiConfig = {
   useProxy: false,
   stylePreset: 'realistic',
   sendStitchedSheet: false,
+  relayEndpointMode: 'images_edits_json',
   promptEnhancer: { baseUrl: 'https://api.openai.com/v1', apiKey: '', model: 'gpt-4o-mini' },
   providers: {
+    relay: { baseUrl: '', apiKey: '', model: '', customModel: '', fetchedModels: [], manualModels: [], useProxy: false },
     pixai: { baseUrl: PROVIDER_META.pixai.defaultBaseUrl, apiKey: '', model: PIXAI_MODEL, customModel: '' },
     gemini: {
       baseUrl: PROVIDER_META.gemini.defaultBaseUrl,
@@ -60,6 +63,14 @@ export const DEFAULT_API_CONFIG: ApiConfig = {
     inputFidelity: 'high',
     background: 'auto',
     outputFormat: 'png',
+    moderation: 'auto',
+  },
+  relayParams: {
+    aspectRatio: '3:4',
+    quality: '2k',
+    inputFidelity: 'auto',
+    background: 'auto',
+    outputFormat: 'auto',
     moderation: 'auto',
   },
   geminiParams: {
@@ -131,12 +142,18 @@ export function mergeStoredConfig(raw: unknown): ApiConfig {
   geminiParams.endpointMode = migrateGeminiEndpointMode(geminiParams.endpointMode, geminiProvider.baseUrl)
   const proxyByDefault = shouldEnableProxyByDefault(activeProvider, activeProviderConfig.baseUrl)
   const useProxy = storedVer < 3 ? proxyByDefault : (obj.useProxy ?? proxyByDefault)
+  const relay = { ...DEFAULT_API_CONFIG.providers.relay, ...obj.providers?.relay }
+  relay.fetchedModels = normalizeRelayModels(relay.fetchedModels)
+  relay.manualModels = normalizeRelayModels(relay.manualModels)
+  if (!relayModelIds(relay).includes(relay.model)) relay.model = ''
+  const storedRelayQuality = (obj.relayParams as { quality?: string } | undefined)?.quality
   return {
     ...DEFAULT_API_CONFIG,
     ...obj,
     activeProvider,
     useProxy,
     providers: {
+      relay,
       gemini: geminiProvider,
       gpt: { ...DEFAULT_API_CONFIG.providers.gpt, ...obj.providers?.gpt },
       qwen: { ...DEFAULT_API_CONFIG.providers.qwen, ...obj.providers?.qwen },
@@ -144,8 +161,19 @@ export function mergeStoredConfig(raw: unknown): ApiConfig {
       pixai: { ...DEFAULT_API_CONFIG.providers.pixai, ...obj.providers?.pixai, model: PIXAI_MODELS.some((entry) => entry.value === obj.providers?.pixai?.model) ? obj.providers!.pixai.model : PIXAI_MODEL, customModel: '' },
       comfyui: comfy.provider,
     },
+    relayEndpointMode: obj.relayEndpointMode === 'chat' || obj.relayEndpointMode === 'images_edits'
+      ? obj.relayEndpointMode : DEFAULT_API_CONFIG.relayEndpointMode,
     promptEnhancer: { ...DEFAULT_API_CONFIG.promptEnhancer, ...obj.promptEnhancer },
     gptParams: { ...DEFAULT_API_CONFIG.gptParams, ...obj.gptParams },
+    relayParams: {
+      ...DEFAULT_API_CONFIG.relayParams,
+      ...obj.relayParams,
+      aspectRatio: ['auto', '2:3', '3:4', '4:5', '9:16', '1:1', '5:4', '4:3', '3:2', '16:9', '21:9'].includes(obj.relayParams?.aspectRatio || '')
+        ? obj.relayParams!.aspectRatio : DEFAULT_API_CONFIG.relayParams.aspectRatio,
+      quality: ['1k', '2k', '4k'].includes(storedRelayQuality || '')
+        ? storedRelayQuality as ApiConfig['relayParams']['quality']
+        : storedRelayQuality === 'low' ? '1k' : ['xhigh', 'max'].includes(storedRelayQuality || '') ? '4k' : '2k',
+    },
     geminiParams,
     qwenParams: { ...DEFAULT_API_CONFIG.qwenParams, ...obj.qwenParams },
     doubaoParams: { ...DEFAULT_API_CONFIG.doubaoParams, ...obj.doubaoParams },

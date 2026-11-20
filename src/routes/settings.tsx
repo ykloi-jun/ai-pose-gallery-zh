@@ -1,12 +1,15 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import {
   CheckIcon,
+  DownloadIcon,
   ExternalLinkIcon,
   EyeIcon,
   EyeOffIcon,
+  PlusIcon,
   RotateCcwIcon,
   ScanSearchIcon,
   SparklesIcon,
+  Trash2Icon,
 } from 'lucide-react'
 import { useState } from 'react'
 import { toast } from '@/lib/notifications'
@@ -21,19 +24,22 @@ import { useStudio } from '@/store/studioStore'
 import type { ImagePassMode, ImageProviderId, PromptEnhancerConfig } from '@/types/gallery'
 import { ComfyConnectionStatus } from '@/components/studio/ComfyConnectionStatus'
 import { COMFY_CONNECTION_LABELS } from '@/store/useComfyConnection'
+import { fetchRelayModels, relayModelIds, RELAY_ENDPOINTS } from '@/services/relay'
 
 export const Route = createFileRoute('/settings')({
   staticData: { title: 'API 配置' },
   component: SettingsPage,
 })
 
-const PROVIDER_ORDER: ImageProviderId[] = ['gemini', 'gpt', 'qwen', 'doubao', 'pixai', 'comfyui']
+const PROVIDER_ORDER: ImageProviderId[] = ['gemini', 'gpt', 'relay', 'qwen', 'doubao', 'pixai', 'comfyui']
 
 function SettingsPage() {
-  const { apiConfig, updateApiConfig, updateProviderConfig, comfyConnection } = useStudio()
+  const { apiConfig, updateApiConfig, updateProviderConfig, setFetchedRelayModels, comfyConnection } = useStudio()
   const [showKey, setShowKey] = useState(false)
   const [showPromptEnhancerKey, setShowPromptEnhancerKey] = useState(false)
   const [testingComfy, setTestingComfy] = useState(false)
+  const [loadingRelayModels, setLoadingRelayModels] = useState(false)
+  const [relayModelInput, setRelayModelInput] = useState('')
 
   const pid = apiConfig.activeProvider
   const meta = PROVIDER_META[pid]
@@ -41,6 +47,34 @@ function SettingsPage() {
   const promptEnhancer = apiConfig.promptEnhancer
   const updatePromptEnhancer = (patch: Partial<PromptEnhancerConfig>) =>
     updateApiConfig({ promptEnhancer: { ...promptEnhancer, ...patch } })
+  const relay = apiConfig.providers.relay
+  const relayModels = relayModelIds(relay)
+
+  const handleFetchRelayModels = async () => {
+    setLoadingRelayModels(true)
+    try {
+      const models = await fetchRelayModels(relay, relay.useProxy)
+      setFetchedRelayModels(relay, models)
+      if (!models.length) {
+        toast.info('接口可用，但没有返回模型；请手动添加模型 ID')
+      } else {
+        toast.success(`已拉取 ${models.length} 个模型`)
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '拉取模型失败')
+    } finally {
+      setLoadingRelayModels(false)
+    }
+  }
+
+  const handleAddRelayModel = () => {
+    const model = relayModelInput.trim()
+    if (!model) return
+    const manualModels = relay.manualModels.includes(model) ? relay.manualModels : [...relay.manualModels, model]
+    updateProviderConfig('relay', { manualModels, model })
+    setRelayModelInput('')
+    toast.success(`已添加并选择 ${model}`)
+  }
 
   const handleDetectComfy = async () => {
     setTestingComfy(true)
@@ -73,8 +107,8 @@ function SettingsPage() {
         }
       />
 
-      {/* 五大协议切换标签 */}
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+      {/* 接口切换标签 */}
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         {PROVIDER_ORDER.map((id) => {
           const itemMeta = PROVIDER_META[id]
           const isActive = pid === id
@@ -113,6 +147,12 @@ function SettingsPage() {
         title={`${meta.name} 连接配置`}
         actions={
           <div className="flex items-center gap-1.5">
+            {pid === 'relay' && (
+              <Button variant="outline" size="sm" onClick={handleFetchRelayModels} disabled={loadingRelayModels || !relay.baseUrl.trim() || !relay.apiKey.trim()}>
+                <DownloadIcon className={`size-3.5 ${loadingRelayModels ? 'animate-bounce' : ''}`} />
+                {loadingRelayModels ? '拉取中…' : '拉取模型'}
+              </Button>
+            )}
             {pid === 'comfyui' && (
               <>
                 <Button variant="outline" size="sm" onClick={handleDetectComfy} disabled={testingComfy}>
@@ -121,20 +161,23 @@ function SettingsPage() {
                 </Button>
               </>
             )}
-            <Button variant="ghost" size="sm" asChild>
+            {meta.docUrl && <Button variant="ghost" size="sm" asChild>
               <a href={meta.docUrl} target="_blank" rel="noreferrer">
                 <ExternalLinkIcon className="size-3.5" />
                 文档
               </a>
-            </Button>
+            </Button>}
             <Button
               variant="ghost"
               size="sm"
+              disabled={pid === 'relay' && loadingRelayModels}
               onClick={() => {
-                updateProviderConfig(pid, {
-                  baseUrl: meta.defaultBaseUrl,
-                  model: meta.models[0].value,
-                })
+                if (pid === 'relay') {
+                  updateProviderConfig('relay', { baseUrl: '', fetchedModels: [], model: relay.manualModels[0] ?? '', useProxy: false })
+                  updateApiConfig({ relayEndpointMode: 'images_edits_json' })
+                } else {
+                  updateProviderConfig(pid, { baseUrl: meta.defaultBaseUrl, model: meta.models[0].value })
+                }
                 toast.success('已恢复默认')
               }}
             >
@@ -146,27 +189,50 @@ function SettingsPage() {
       >
         <Field
           label={pid === 'comfyui' ? 'ComfyUI 地址 (Base URL)' : 'Base URL'}
+          htmlFor="provider-base-url"
           hint={
-            pid === 'comfyui'
+            pid === 'relay'
+              ? '填写中转站兼容 OpenAI API 的根地址或 /v1 地址。服务端代理仅允许 HTTPS，并受 PROXY_ALLOWED_ORIGINS 白名单限制。'
+              : pid === 'comfyui'
               ? `本地运行本站时填 /comfy（同源代理，无需改跨域设置）；直连时 ComfyUI 需加启动参数 --enable-cors-header "${typeof window !== 'undefined' ? window.location.origin : '*'}"。Desktop 版默认端口 8000，便携版 8188`
               : undefined
           }
         >
           <Input
-            disabled={pid === 'pixai'}
+            id="provider-base-url"
+            disabled={pid === 'pixai' || (pid === 'relay' && loadingRelayModels)}
             type={pid === 'comfyui' ? 'text' : 'url'}
             value={pCfg.baseUrl}
-            onChange={(e) => updateProviderConfig(pid, { baseUrl: e.target.value })}
-            placeholder={meta.defaultBaseUrl}
+            onChange={(e) => {
+              const baseUrl = e.target.value
+              if (pid === 'relay') {
+                const model = relay.manualModels.includes(relay.model) ? relay.model : relay.manualModels[0] ?? ''
+                updateProviderConfig('relay', { baseUrl, fetchedModels: [], model })
+              } else {
+                updateProviderConfig(pid, { baseUrl })
+              }
+            }}
+            placeholder={pid === 'relay' ? 'https://relay.example.com/v1' : meta.defaultBaseUrl}
           />
         </Field>
 
-        <Field label={pid === 'comfyui' ? 'API Key（可选，本地留空）' : 'API Key'}>
+        <Field label={pid === 'comfyui' ? 'API Key（可选，本地留空）' : 'API Key'} htmlFor="provider-api-key">
           <div className="relative">
             <Input
+              id="provider-api-key"
               type={showKey ? 'text' : 'password'}
+              disabled={pid === 'relay' && loadingRelayModels}
+              autoComplete="off"
               value={pCfg.apiKey}
-              onChange={(e) => updateProviderConfig(pid, { apiKey: e.target.value })}
+              onChange={(e) => {
+                const apiKey = e.target.value
+                if (pid === 'relay') {
+                  const model = relay.manualModels.includes(relay.model) ? relay.model : relay.manualModels[0] ?? ''
+                  updateProviderConfig('relay', { apiKey, fetchedModels: [], model })
+                } else {
+                  updateProviderConfig(pid, { apiKey })
+                }
+              }}
               placeholder={
                 pid === 'comfyui'
                   ? '本地 ComfyUI 无需填写，远程鉴权可填 Token'
@@ -177,6 +243,7 @@ function SettingsPage() {
             <button
               type="button"
               onClick={() => setShowKey((s) => !s)}
+              aria-label={showKey ? '隐藏 API Key' : '显示 API Key'}
               className="absolute top-1/2 right-3 -translate-y-1/2 text-muted-foreground hover:text-foreground"
             >
               {showKey ? <EyeOffIcon className="size-4" /> : <EyeIcon className="size-4" />}
@@ -184,7 +251,81 @@ function SettingsPage() {
           </div>
         </Field>
 
-        {pid !== 'comfyui' && (
+        {pid === 'relay' && (
+          <>
+            <Field label="模型" htmlFor="relay-model" hint={relayModels.length ? `已保存 ${relayModels.length} 个模型 ID。请选择支持图像输出的模型。` : '可拉取模型列表，也可手动添加服务商提供的模型 ID。'}>
+              <Select value={relay.model} disabled={!relayModels.length} onValueChange={(model) => updateProviderConfig('relay', { model })}>
+                <SelectTrigger id="relay-model" className="w-full font-mono text-xs">
+                  <SelectValue placeholder="选择已保存的模型" />
+                </SelectTrigger>
+                <SelectContent position="popper" className="w-(--radix-select-trigger-width)">
+                  {relayModels.map((model) => (
+                    <SelectItem key={model} value={model} className="font-mono text-xs [overflow-wrap:anywhere]">{model}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label="手动添加模型 ID" htmlFor="relay-manual-model">
+              <div className="flex gap-2">
+                <Input
+                  id="relay-manual-model"
+                  value={relayModelInput}
+                  onChange={(e) => setRelayModelInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+                      e.preventDefault()
+                      handleAddRelayModel()
+                    }
+                  }}
+                  placeholder="例如 provider/image-model"
+                  className="font-mono text-xs"
+                />
+                <Button type="button" variant="outline" onClick={handleAddRelayModel} disabled={!relayModelInput.trim()}>
+                  <PlusIcon />
+                  添加
+                </Button>
+              </div>
+              {relay.manualModels.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {relay.manualModels.map((model) => (
+                    <div key={model} className="flex min-w-0 max-w-full items-center gap-2 rounded-md border px-2 py-1 font-mono text-xs">
+                      <span className="truncate" title={model}>{model}</span>
+                      <button
+                        type="button"
+                        className="shrink-0 text-muted-foreground hover:text-destructive"
+                        aria-label={`移除手动添加的模型 ${model}`}
+                        onClick={() => {
+                          const manualModels = relay.manualModels.filter((item) => item !== model)
+                          const modelStillAvailable = relay.model !== model || relay.fetchedModels.includes(model)
+                          const selectedModel = modelStillAvailable ? relay.model : manualModels[0] ?? relay.fetchedModels[0] ?? ''
+                          updateProviderConfig('relay', { manualModels, model: selectedModel })
+                        }}
+                      >
+                        <Trash2Icon className="size-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Field>
+            <Field label="生图接口协议" htmlFor="relay-endpoint-mode" hint="按中转站支持的图像接口选择。">
+              <Select value={apiConfig.relayEndpointMode} onValueChange={(value) => updateApiConfig({ relayEndpointMode: value as typeof apiConfig.relayEndpointMode })}>
+                <SelectTrigger id="relay-endpoint-mode" className="w-full"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {Object.entries(RELAY_ENDPOINTS).map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label="通过本站代理转发" hint="开启可绕过浏览器跨域限制。中转站域名必须加入部署环境的 PROXY_ALLOWED_ORIGINS。">
+              <div className="flex h-9 items-center justify-between rounded-xl border bg-background px-3">
+                <span className="text-xs text-muted-foreground">{relay.useProxy ? '已启用' : '浏览器直连'}</span>
+                <Switch aria-label="通过本站代理转发" checked={relay.useProxy} disabled={loadingRelayModels} onCheckedChange={(useProxy) => updateProviderConfig('relay', { useProxy })} />
+              </div>
+            </Field>
+          </>
+        )}
+
+        {pid !== 'comfyui' && pid !== 'relay' && (
           <Field label="默认模型 ID">
             <Select
               value={pCfg.model}
@@ -204,7 +345,7 @@ function SettingsPage() {
           </Field>
         )}
 
-        {pid !== 'comfyui' && pCfg.model === 'custom' && (
+        {pid !== 'comfyui' && pid !== 'relay' && pCfg.model === 'custom' && (
           <Field label="自定义模型 ID">
             <Input
               value={pCfg.customModel}
@@ -280,7 +421,7 @@ function SettingsPage() {
             </Select>
           </Field>}
 
-          <Field
+          {pid !== 'relay' && <Field
             label="服务端 CORS 代理 (/api/proxy)"
             hint="默认关闭（浏览器直连）；切换到阿里云百炼 (Qwen)、火山方舟 (Doubao) 或 PixAI 时会自动开启。仅支持白名单域名（可通过服务端环境变量 PROXY_ALLOWED_ORIGINS 扩展）"
           >
@@ -293,12 +434,15 @@ function SettingsPage() {
                 onCheckedChange={(v) => updateApiConfig({ useProxy: v })}
               />
             </div>
-          </Field>
+          </Field>}
         </Section>
       )}
 
       <div className="flex justify-end">
-        <Button size="sm" onClick={() => toast.success('配置已保存')}>
+        <Button size="sm" onClick={() => {
+          if (pid === 'relay' && relayModelInput.trim()) handleAddRelayModel()
+          else toast.success('配置已保存')
+        }}>
           <CheckIcon className="size-4" />
           保存配置
         </Button>

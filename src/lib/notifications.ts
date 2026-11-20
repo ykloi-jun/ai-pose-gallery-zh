@@ -3,6 +3,7 @@ import { toast as sonner, type ExternalToast, type ToastT } from 'sonner'
 
 export type Notification = ToastT & {
   notificationDuration?: number
+  notificationAutoDismissWhilePaused?: boolean
   notificationRevision?: number
   notificationAutoClosing?: { current: boolean }
   notificationOnDismiss?: ToastT['onDismiss']
@@ -12,7 +13,9 @@ let revision = 0
 
 // Sonner hides overflow toasts but still starts their clocks. Keep its renderer/store;
 // the Toaster starts these clocks only after a notification can actually be read.
-function managed(options: ExternalToast = {}) {
+type NotificationOptions = ExternalToast & { autoDismissWhilePaused?: boolean }
+
+function managed({ autoDismissWhilePaused, ...options }: NotificationOptions = {}) {
   const previous = options.id === undefined ? undefined : sonner.getToasts().find((item) => item.id === options.id) as Notification | undefined
   const nextRevision = ++revision
   const autoClosing = { current: false }
@@ -22,6 +25,7 @@ function managed(options: ExternalToast = {}) {
     ...options,
     duration: Infinity,
     notificationDuration: options.duration ?? previous?.notificationDuration ?? 4000,
+    notificationAutoDismissWhilePaused: autoDismissWhilePaused ?? previous?.notificationAutoDismissWhilePaused,
     notificationRevision: nextRevision,
     notificationAutoClosing: autoClosing,
     notificationOnDismiss: onDismiss,
@@ -55,14 +59,14 @@ function promiseResult(value: unknown, fallback: Omit<ExternalToast, 'descriptio
   return { ...managed({ ...fallback, ...extended }), message: extended.message }
 }
 
-export const toast: typeof sonner = Object.assign(
+export const toast = Object.assign(
   (message: Parameters<typeof sonner>[0], options?: ExternalToast) => sonner(message, managed(options)),
   {
     ...sonner,
-    success: (message: Parameters<typeof sonner.success>[0], options?: ExternalToast) => sonner.success(message, managed(options)),
-    info: (message: Parameters<typeof sonner.info>[0], options?: ExternalToast) => sonner.info(message, managed(options)),
+    success: (message: Parameters<typeof sonner.success>[0], options?: NotificationOptions) => sonner.success(message, managed(options)),
+    info: (message: Parameters<typeof sonner.info>[0], options?: NotificationOptions) => sonner.info(message, managed(options)),
     warning: (message: Parameters<typeof sonner.warning>[0], options?: ExternalToast) => sonner.warning(message, managed(options)),
-    error: (message: Parameters<typeof sonner.error>[0], options?: ExternalToast) => sonner.error(message, managed(options)),
+    error: (message: Parameters<typeof sonner.error>[0], options?: NotificationOptions) => sonner.error(message, managed(options)),
     loading: (message: Parameters<typeof sonner.loading>[0], options?: ExternalToast) => sonner.loading(message, managed(options)),
     message: (message: Parameters<typeof sonner.message>[0], options?: ExternalToast) => sonner.message(message, managed(options)),
     custom: (render: Parameters<typeof sonner.custom>[0], options?: ExternalToast) => sonner.custom(render, managed(options)),

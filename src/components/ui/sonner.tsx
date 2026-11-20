@@ -108,7 +108,11 @@ export function Toaster(props: ToasterProps) {
   }, [])
 
   return <>
-    {toasts.map((notice: Notification) => <Lifetime key={notice.id} notice={notice} paused={notice.notificationRevision === undefined || background || hovered || focused || toggleFocused || expanded || !readable.has(notice.id)} />)}
+    {toasts.map((notice: Notification) => {
+      const paused = background || hovered || focused || toggleFocused || expanded || !readable.has(notice.id)
+      return <Lifetime key={notice.id} notice={notice}
+        paused={notice.notificationRevision === undefined || (!notice.notificationAutoDismissWhilePaused && paused)} />
+    })}
     <div ref={events} className="app-notification-events"
       onPointerEnter={(event) => { if (event.pointerType !== 'touch') setHovered(true) }}
       onPointerLeave={() => setHovered(false)}
